@@ -1378,8 +1378,9 @@ async def main():
         from mcp.server.stdio import stdio_server
         
         async with stdio_server() as (read_stream, write_stream):
-            logger.info("Server running on stdio")
+            logger.info("Server running on stdio - waiting for connections...")
             
+            # This will keep running until the streams are closed
             await app.run(
                 read_stream,
                 write_stream,
@@ -1393,7 +1394,10 @@ async def main():
         raise
     finally:
         # Cleanup
-        await http_client.close()
+        try:
+            await http_client.close()
+        except:
+            pass
         logger.info("Server stopped")
 
 
