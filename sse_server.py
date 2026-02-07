@@ -1,10 +1,11 @@
 """
-ScreenApp MCP SSE Server - Simple working version for Zeabur
+ScreenApp MCP SSE Server - Fixed for multiple concurrent connections
 """
 import asyncio
 import json
 import logging
 import os
+from typing import Set
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,29 +24,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global MCP process
+# Global state
 mcp_process = None
+message_queues: Set[asyncio.Queue] = set()
+broadcast_task = None
 
-@app.on_event("startup")
-async def startup():
-    """Start MCP server on startup"""
+async def read_mcp_stdout():
+    """Read from MCP stdout and broadcast to all connected clients"""
     global mcp_process
-    logger.info("Starting MCP server process...")
+    
+    if not mcp_process or not mcp_process.stdout:
+        logger.error("MCP stdout not available")
+        return
+    
+    logger.info("Started reading MCP stdout")
     
     try:
-        mcp_process = await asyncio.create_subprocess_exec(
-            "python", "-u", "screenapp_mcp_server.py",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        logger.info("MCP server started")
-        
-        # Start background task to read stderr
-        asyncio.create_task(read_stderr())
-        
+        while True:
+            line = await mcp_process.stdout.readline()
+            if not line:
+                logger.warning("MCP stdout closed")
+                break
+            
+            try:
+                data = json.loads(line.decode().strip())
+                # Broadcast to all connected clients
+                for queue in list(message_queues):
+                    try:
+                        await queue.put(data)
+                    except:
+                        pass
+            except json.JSONDecodeError:
+                continue
+                
     except Exception as e:
-        logger.error(f"Failed to start MCP: {e}")
+        logger.error(f"Error reading MCP stdout: {e}")
 
 async def read_stderr():
     """Read and log stderr from MCP server"""
@@ -61,12 +74,37 @@ async def read_stderr():
         except:
             break
 
+@app.on_event("startup")
+async def startup():
+    """Start MCP server on startup"""
+    global mcp_process, broadcast_task
+    logger.info("Starting MCP server process...")
+    
+    try:
+        mcp_process = await asyncio.create_subprocess_exec(
+            "python", "-u", "screenapp_mcp_server.py",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        logger.info("MCP server started")
+        
+        # Start background tasks
+        asyncio.create_task(read_stderr())
+        broadcast_task = asyncio.create_task(read_mcp_stdout())
+        
+    except Exception as e:
+        logger.error(f"Failed to start MCP: {e}")
+
 @app.on_event("shutdown")
 async def shutdown():
     """Stop MCP server"""
     if mcp_process:
         mcp_process.terminate()
         await mcp_process.wait()
+    
+    if broadcast_task:
+        broadcast_task.cancel()
 
 @app.get("/health")
 async def health():
@@ -75,14 +113,19 @@ async def health():
     return {
         "status": "healthy" if is_running else "unhealthy",
         "mcp_running": is_running,
+        "connected_clients": len(message_queues),
         "team_id": os.getenv("SCREENAPP_TEAM_ID", "not_set")
     }
 
 @app.post("/message")
 async def send_message(request: dict):
-    """Send JSON-RPC message to MCP server"""
+    """Send JSON-RPC message to MCP server and get response"""
     if not mcp_process or not mcp_process.stdin:
         return JSONResponse({"error": "MCP server not running"}, status_code=503)
+    
+    # Create a temporary queue for this request
+    response_queue = asyncio.Queue()
+    message_queues.add(response_queue)
     
     try:
         # Send message
@@ -90,13 +133,8 @@ async def send_message(request: dict):
         mcp_process.stdin.write(message.encode())
         await mcp_process.stdin.drain()
         
-        # Read response
-        response_line = await asyncio.wait_for(
-            mcp_process.stdout.readline(), 
-            timeout=30.0
-        )
-        
-        response = json.loads(response_line.decode())
+        # Wait for response
+        response = await asyncio.wait_for(response_queue.get(), timeout=30.0)
         return response
         
     except asyncio.TimeoutError:
@@ -104,29 +142,36 @@ async def send_message(request: dict):
     except Exception as e:
         logger.error(f"Error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+    finally:
+        message_queues.discard(response_queue)
 
 @app.get("/sse")
 async def sse():
-    """SSE endpoint for MCP protocol"""
+    """SSE endpoint for MCP protocol - supports multiple concurrent connections"""
+    
+    # Create a queue for this connection
+    client_queue = asyncio.Queue()
+    message_queues.add(client_queue)
+    
+    logger.info(f"New SSE client connected. Total clients: {len(message_queues)}")
+    
     async def event_stream():
-        if not mcp_process or not mcp_process.stdout:
-            yield f"data: {json.dumps({'error': 'MCP not running'})}\n\n"
-            return
-        
         try:
+            # Send initial connection message
+            yield f"data: {json.dumps({'type': 'connected', 'clients': len(message_queues)})}\n\n"
+            
             while True:
-                line = await mcp_process.stdout.readline()
-                if not line:
-                    break
+                # Get message from this client's queue
+                message = await client_queue.get()
+                yield f"data: {json.dumps(message)}\n\n"
                 
-                try:
-                    data = json.loads(line.decode())
-                    yield f"data: {json.dumps(data)}\n\n"
-                except json.JSONDecodeError:
-                    continue
-                    
+        except asyncio.CancelledError:
+            logger.info("Client disconnected")
         except Exception as e:
-            logger.error(f"SSE error: {e}")
+            logger.error(f"SSE stream error: {e}")
+        finally:
+            message_queues.discard(client_queue)
+            logger.info(f"Client removed. Remaining clients: {len(message_queues)}")
     
     return StreamingResponse(
         event_stream(),
