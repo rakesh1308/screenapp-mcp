@@ -6,7 +6,7 @@ import json
 import logging
 import os
 from typing import Set
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -145,11 +145,49 @@ async def send_message(request: dict):
     finally:
         message_queues.discard(response_queue)
 
-@app.get("/sse")
-async def sse():
-    """SSE endpoint for MCP protocol - supports multiple concurrent connections"""
+@app.api_route("/sse", methods=["GET", "POST", "HEAD", "OPTIONS"])
+async def sse(request: Request):
+    """SSE endpoint for MCP protocol - supports GET (streaming) and POST (request/response)"""
     
-    # Create a queue for this connection
+    # Handle OPTIONS for CORS
+    if request.method == "OPTIONS":
+        return JSONResponse({"status": "ok"})
+    
+    # Handle HEAD
+    if request.method == "HEAD":
+        return JSONResponse({"status": "ready"})
+    
+    # Handle POST - send message and get response
+    if request.method == "POST":
+        if not mcp_process or not mcp_process.stdin:
+            return JSONResponse({"error": "MCP server not running"}, status_code=503)
+        
+        # Create a temporary queue for this request
+        response_queue = asyncio.Queue()
+        message_queues.add(response_queue)
+        
+        try:
+            # Get request body
+            body = await request.json()
+            
+            # Send to MCP server
+            message = json.dumps(body) + "\n"
+            mcp_process.stdin.write(message.encode())
+            await mcp_process.stdin.drain()
+            
+            # Wait for response
+            response = await asyncio.wait_for(response_queue.get(), timeout=30.0)
+            return JSONResponse(response)
+            
+        except asyncio.TimeoutError:
+            return JSONResponse({"error": "Timeout"}, status_code=504)
+        except Exception as e:
+            logger.error(f"Error handling POST: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+        finally:
+            message_queues.discard(response_queue)
+    
+    # Handle GET - SSE streaming for multiple concurrent connections
     client_queue = asyncio.Queue()
     message_queues.add(client_queue)
     
