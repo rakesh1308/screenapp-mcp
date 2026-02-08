@@ -230,12 +230,13 @@ async def execute_tool(name: str, args: dict) -> str:
             file_id = args["fileId"]
             question = args["question"]
             
-            # Build request body
+            # Build request body - ALWAYS include at least transcript analysis
             request_body = {"promptText": question}
             
-            # Add media analysis options
+            # Media analysis options - default to transcript only
             media_options = {}
             
+            # Always analyze transcript unless explicitly disabled
             if args.get("analyze_transcript", True):
                 media_options["transcript"] = {
                     "segments": [{
@@ -254,8 +255,8 @@ async def execute_tool(name: str, args: dict) -> str:
                     "timestamps": [30, 60, 90, 120]
                 }
             
-            if media_options:
-                request_body["mediaAnalysisOptions"] = media_options
+            # Always include mediaAnalysisOptions (API may require it)
+            request_body["mediaAnalysisOptions"] = media_options
             
             r = await client.post(
                 f"{BASE_URL}/v2/files/{file_id}/ask/multimodal",
@@ -264,7 +265,14 @@ async def execute_tool(name: str, args: dict) -> str:
             r.raise_for_status()
             data = r.json()
             
-            return f"🤖 AI Answer:\n\n{data.get('answer', data.get('result', 'No answer generated'))}"
+            # API returns {"answer": "...", "sessionId": "..."}
+            answer = data.get("answer", "")
+            
+            if not answer:
+                logger.error(f"Empty answer from API. Full response: {data}")
+                return f"❌ No answer generated. API response: {data}"
+            
+            return f"🤖 AI Answer:\n\n{answer}"
         
         # FILE TAGS
         elif name == "add_file_tag":
