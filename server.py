@@ -92,28 +92,29 @@ async def execute_tool(name: str, args: dict) -> str:
     try:
         if name == "list_recordings":
             limit = args.get("limit", 10)
-            r = await client.get(f"{BASE_URL}/team/{SCREENAPP_TEAM_ID}/recordings", params={"limit": limit})
+            # Correct endpoint from API docs - no team listings, use files
+            r = await client.get(f"{BASE_URL}/v2/files", params={"limit": limit})
             r.raise_for_status()
             data = r.json()
-            recordings = data.get("recordings", [])
+            files = data.get("files", [])
             
-            result = f"📹 {len(recordings)} recordings:\n\n"
-            for i, rec in enumerate(recordings, 1):
-                result += f"{i}. {rec.get('title', 'Untitled')}\n"
+            result = f"📹 {len(files)} recordings:\n\n"
+            for i, rec in enumerate(files, 1):
+                result += f"{i}. {rec.get('name', 'Untitled')}\n"
                 result += f"   ID: {rec.get('id')}\n"
                 result += f"   Duration: {rec.get('duration', 0)}s\n\n"
             return result
         
         elif name == "get_recording":
             rid = args["recording_id"]
-            r = await client.get(f"{BASE_URL}/recordings/{rid}")
+            r = await client.get(f"{BASE_URL}/v2/files/{rid}")
             r.raise_for_status()
             data = r.json()
-            return f"📹 {data.get('title', 'Untitled')}\nID: {data.get('id')}\nStatus: {data.get('status')}\nDuration: {data.get('duration', 0)}s"
+            return f"📹 {data.get('name', 'Untitled')}\nID: {data.get('id')}\nStatus: {data.get('status')}\nDuration: {data.get('duration', 0)}s"
         
         elif name == "get_transcript":
             fid = args["file_id"]
-            r = await client.get(f"{BASE_URL}/files/{fid}/transcript")
+            r = await client.get(f"{BASE_URL}/v2/files/{fid}/transcript")
             r.raise_for_status()
             data = r.json()
             segments = data.get("transcript", {}).get("segments", [])
@@ -128,9 +129,17 @@ async def execute_tool(name: str, args: dict) -> str:
         elif name == "analyze_recording":
             fid = args["file_id"]
             prompt = args["prompt"]
+            # Use correct multimodal endpoint from docs
             r = await client.post(
-                f"{BASE_URL}/files/{fid}/ask/multimodal",
-                json={"prompt": prompt, "includeTranscript": True}
+                f"{BASE_URL}/v2/files/{fid}/ask/multimodal",
+                json={
+                    "promptText": prompt,
+                    "mediaAnalysisOptions": {
+                        "transcript": {
+                            "segments": [{"start": 0, "end": 999999}]
+                        }
+                    }
+                }
             )
             r.raise_for_status()
             data = r.json()
