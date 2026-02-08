@@ -1,6 +1,6 @@
 """
-ScreenApp MCP Server - Complete Implementation
-Matches the official ScreenApp MCP with all tools
+ScreenApp MCP Server - Complete Working Implementation
+Uses ScreenApp's actual internal API endpoints
 """
 import os
 import logging
@@ -10,21 +10,20 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("screenapp")
+logger = logging.getLogger("screenapp-mcp")
 
-# Config
-SCREENAPP_API_TOKEN = os.getenv("SCREENAPP_API_TOKEN")
-SCREENAPP_TEAM_ID = os.getenv("SCREENAPP_TEAM_ID")
+# Configuration
+API_KEY = os.getenv("SCREENAPP_API_TOKEN")
+TEAM_ID = os.getenv("SCREENAPP_TEAM_ID")
 BASE_URL = "https://api.screenapp.io"
 
-if not SCREENAPP_API_TOKEN or not SCREENAPP_TEAM_ID:
-    raise ValueError("Missing SCREENAPP_API_TOKEN or SCREENAPP_TEAM_ID")
+if not API_KEY or not TEAM_ID:
+    raise ValueError("SCREENAPP_API_TOKEN and SCREENAPP_TEAM_ID required")
 
-# HTTP client
+# HTTP Client with proper auth
 client = httpx.AsyncClient(
     headers={
-        "Authorization": f"Bearer {SCREENAPP_API_TOKEN}",
-        "X-Team-ID": SCREENAPP_TEAM_ID,
+        "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
     },
     timeout=60.0
@@ -40,7 +39,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Complete tool definitions matching ScreenApp MCP
+# Complete tool definitions
 TOOLS = [
     {
         "name": "get_profile",
@@ -65,47 +64,47 @@ TOOLS = [
     },
     {
         "name": "list_recordings",
-        "description": "List recordings/files",
+        "description": "List recordings/files from your ScreenApp account",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "limit": {"type": "number", "default": 20},
-                "offset": {"type": "number", "default": 0},
-                "teamId": {"type": "string"}
+                "limit": {"type": "number", "default": 20, "description": "Max results"},
+                "offset": {"type": "number", "default": 0, "description": "Skip count"},
+                "teamId": {"type": "string", "description": "Optional team ID filter"}
             }
         }
     },
     {
         "name": "get_recording",
-        "description": "Get recording metadata",
+        "description": "Get metadata about a specific recording",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "fileId": {"type": "string"}
+                "fileId": {"type": "string", "description": "The recording/file ID"}
             },
             "required": ["fileId"]
         }
     },
     {
         "name": "search_recordings",
-        "description": "Search in transcripts",
+        "description": "Search for content within recording transcripts",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
-                "teamId": {"type": "string"}
+                "query": {"type": "string", "description": "Search query"},
+                "teamId": {"type": "string", "description": "Team ID to search within"}
             },
             "required": ["query", "teamId"]
         }
     },
     {
         "name": "assistant_search",
-        "description": "AI-powered search",
+        "description": "AI-powered search with intelligent query optimization",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
-                "teamId": {"type": "string"},
+                "query": {"type": "string", "description": "Search query"},
+                "teamId": {"type": "string", "description": "Team ID"},
                 "limit": {"type": "number", "default": 10}
             },
             "required": ["query", "teamId"]
@@ -113,51 +112,51 @@ TOOLS = [
     },
     {
         "name": "ask_recording",
-        "description": "Ask AI about a recording",
+        "description": "Ask AI a question about a specific recording",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "fileId": {"type": "string"},
-                "question": {"type": "string"}
+                "fileId": {"type": "string", "description": "The recording ID"},
+                "question": {"type": "string", "description": "Your question"}
             },
             "required": ["fileId", "question"]
         }
     },
     {
         "name": "ask_multiple_recordings",
-        "description": "Ask AI across multiple recordings",
+        "description": "Ask AI a question across multiple recordings",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "question": {"type": "string"},
-                "teamId": {"type": "string"},
-                "fileIds": {"type": "array", "items": {"type": "string"}}
+                "question": {"type": "string", "description": "Your question"},
+                "teamId": {"type": "string", "description": "Team ID"},
+                "fileIds": {"type": "array", "items": {"type": "string"}, "description": "Optional file IDs"}
             },
             "required": ["question", "teamId"]
         }
     },
     {
         "name": "get_usage_stats",
-        "description": "Get usage statistics",
+        "description": "Get usage statistics and billing information",
         "inputSchema": {"type": "object", "properties": {}}
     }
 ]
 
 async def execute_tool(name: str, args: dict) -> str:
-    """Execute a tool"""
+    """Execute a tool using ScreenApp's API"""
     try:
         if name == "get_profile":
-            r = await client.get(f"{BASE_URL}/v2/account/profile")
+            r = await client.get(f"{BASE_URL}/api/user/profile")
             r.raise_for_status()
             data = r.json()
-            user = data.get("data", data)
-            return f"👤 Profile:\nName: {user.get('name', 'N/A')}\nEmail: {user.get('email', 'N/A')}"
+            user = data.get("user", {})
+            return f"👤 Profile:\nID: {user.get('id')}\nEmail: {user.get('email')}"
         
         elif name == "list_teams":
-            r = await client.get(f"{BASE_URL}/v2/teams")
+            r = await client.get(f"{BASE_URL}/api/teams")
             r.raise_for_status()
             data = r.json()
-            teams = data.get("teams", data.get("data", []))
+            teams = data.get("teams", [])
             
             if not teams:
                 return "No teams found"
@@ -165,67 +164,95 @@ async def execute_tool(name: str, args: dict) -> str:
             result = f"👥 Teams ({len(teams)}):\n\n"
             for i, t in enumerate(teams, 1):
                 result += f"{i}. {t.get('name', 'Untitled')}\n"
-                result += f"   ID: {t.get('teamId') or t.get('id')}\n\n"
+                result += f"   ID: {t.get('teamId')}\n"
+                result += f"   Owner: {t.get('ownerId')}\n\n"
             return result
         
         elif name == "get_team":
             tid = args["teamId"]
-            r = await client.get(f"{BASE_URL}/v2/team/{tid}")
+            r = await client.get(f"{BASE_URL}/api/team/{tid}")
             r.raise_for_status()
             data = r.json()
-            team = data.get("data", data)
-            return f"👥 Team: {team.get('name', 'Untitled')}\nID: {team.get('id')}\nMembers: {team.get('memberCount', 'N/A')}"
+            team = data.get("team", {})
+            return f"👥 Team: {team.get('name')}\nID: {team.get('teamId')}\nCreated: {team.get('createdAt')}"
         
         elif name == "list_recordings":
-            limit = args.get("limit", 20)
-            offset = args.get("offset", 0)
-            team_id = args.get("teamId", SCREENAPP_TEAM_ID)
+            limit = int(args.get("limit", 20))
+            offset = int(args.get("offset", 0))
             
-            r = await client.get(f"{BASE_URL}/v2/files", params={"limit": limit, "offset": offset})
+            r = await client.get(
+                f"{BASE_URL}/api/files",
+                params={"limit": limit, "offset": offset}
+            )
             r.raise_for_status()
             data = r.json()
-            files = data.get("files", data.get("data", []))
+            
+            files = data.get("files", [])
+            pagination = data.get("pagination", {})
+            total = pagination.get("total", len(files))
             
             if not files:
-                return "📹 No recordings found.\n\n💡 Create one at https://screenapp.io/app"
+                return "📹 No recordings found.\n\n💡 Upload files at https://screenapp.io/app"
             
-            result = f"📹 Recordings ({len(files)}):\n\n"
-            for i, f in enumerate(files, 1):
-                name = f.get('name') or f.get('title') or 'Untitled'
-                fid = f.get('id') or f.get('fileId')
-                dur = f.get('duration', 0)
-                result += f"{i}. {name}\n   ID: {fid}\n   Duration: {dur}s\n\n"
+            result = f"📹 Recordings ({len(files)} of {total}):\n\n"
+            for i, f in enumerate(files, offset + 1):
+                result += f"{i}. {f.get('name', 'Untitled')}\n"
+                result += f"   📄 ID: {f.get('_id')}\n"
+                result += f"   ⏱️  Duration: {f.get('duration', 0):.1f}s\n"
+                result += f"   📅 Created: {f.get('createdAt')}\n\n"
+            
+            if pagination.get("hasMore"):
+                next_offset = offset + limit
+                result += f"💡 More available: use offset={next_offset}\n"
+            
             return result
         
         elif name == "get_recording":
             fid = args["fileId"]
-            r = await client.get(f"{BASE_URL}/v2/files/{fid}")
+            r = await client.get(f"{BASE_URL}/api/file/{fid}")
             r.raise_for_status()
             data = r.json()
-            rec = data.get("data", data)
+            file = data.get("file", {})
             
-            name = rec.get('name') or rec.get('title') or 'Untitled'
-            return f"📹 {name}\nID: {rec.get('id')}\nDuration: {rec.get('duration', 0)}s\nStatus: {rec.get('status', 'unknown')}"
+            result = f"📹 {file.get('name', 'Untitled')}\n\n"
+            result += f"📄 ID: {file.get('_id')}\n"
+            result += f"⏱️  Duration: {file.get('duration', 0):.1f}s\n"
+            result += f"📦 Size: {file.get('size', 0) / 1024 / 1024:.1f} MB\n"
+            result += f"👤 Owner: {file.get('recorderName', 'Unknown')}\n"
+            result += f"📅 Created: {file.get('createdAt')}\n"
+            
+            if file.get('url'):
+                result += f"\n🔗 Video URL: {file['url'][:80]}...\n"
+            
+            text_data = file.get('textData', {})
+            if text_data.get('transcriptUrl'):
+                result += f"📝 Transcript: Available\n"
+            
+            return result
         
         elif name == "search_recordings":
             query = args["query"]
             team_id = args["teamId"]
             
-            # Use ScreenApp search API
             r = await client.post(
-                f"{BASE_URL}/v2/search",
+                f"{BASE_URL}/api/search",
                 json={"query": query, "teamId": team_id}
             )
             r.raise_for_status()
             data = r.json()
-            results = data.get("results", data.get("data", []))
+            results = data.get("results", [])
             
             if not results:
                 return f"🔍 No results for '{query}'"
             
-            result = f"🔍 Found {len(results)} results:\n\n"
-            for i, r in enumerate(results[:10], 1):
-                result += f"{i}. {r.get('title', 'Untitled')}\n   Snippet: {r.get('snippet', '')[:100]}\n\n"
+            result = f"🔍 Found {len(results)} results for '{query}':\n\n"
+            for i, item in enumerate(results[:10], 1):
+                result += f"{i}. {item.get('name', 'Untitled')}\n"
+                result += f"   ID: {item.get('fileId')}\n"
+                if item.get('snippet'):
+                    result += f"   📝 {item['snippet'][:100]}...\n"
+                result += "\n"
+            
             return result
         
         elif name == "assistant_search":
@@ -234,20 +261,22 @@ async def execute_tool(name: str, args: dict) -> str:
             limit = args.get("limit", 10)
             
             r = await client.post(
-                f"{BASE_URL}/v2/assistant/search",
+                f"{BASE_URL}/api/assistant/search",
                 json={"query": query, "teamId": team_id, "limit": limit}
             )
             r.raise_for_status()
             data = r.json()
             
-            answer = data.get("answer", "No answer")
-            results = data.get("results", [])
+            answer = data.get("answer", "")
+            sources = data.get("sources", [])
             
-            result = f"🤖 AI Answer:\n{answer}\n\n"
-            if results:
-                result += f"📚 Sources ({len(results)}):\n"
-                for i, r in enumerate(results[:5], 1):
-                    result += f"{i}. {r.get('title', 'Untitled')}\n"
+            result = f"🤖 AI Answer:\n\n{answer}\n"
+            
+            if sources:
+                result += f"\n📚 Sources ({len(sources)}):\n"
+                for i, s in enumerate(sources[:5], 1):
+                    result += f"{i}. {s.get('name', 'Unknown')}\n"
+            
             return result
         
         elif name == "ask_recording":
@@ -255,12 +284,14 @@ async def execute_tool(name: str, args: dict) -> str:
             question = args["question"]
             
             r = await client.post(
-                f"{BASE_URL}/v2/files/{fid}/ask/multimodal",
-                json={"promptText": question}
+                f"{BASE_URL}/api/file/{fid}/ask",
+                json={"question": question}
             )
             r.raise_for_status()
             data = r.json()
-            return f"🤖 {data.get('answer', 'No answer')}"
+            
+            answer = data.get("answer", "No answer generated")
+            return f"🤖 AI Answer:\n\n{answer}"
         
         elif name == "ask_multiple_recordings":
             question = args["question"]
@@ -268,36 +299,58 @@ async def execute_tool(name: str, args: dict) -> str:
             file_ids = args.get("fileIds", [])
             
             r = await client.post(
-                f"{BASE_URL}/v2/team/{team_id}/ask/multimodal",
-                json={"promptText": question, "fileIds": file_ids}
+                f"{BASE_URL}/api/team/{team_id}/ask",
+                json={"question": question, "fileIds": file_ids}
             )
             r.raise_for_status()
             data = r.json()
-            return f"🤖 {data.get('answer', 'No answer')}"
+            
+            answer = data.get("answer", "No answer generated")
+            return f"🤖 AI Answer:\n\n{answer}"
         
         elif name == "get_usage_stats":
-            r = await client.get(f"{BASE_URL}/v2/usage")
+            r = await client.get(f"{BASE_URL}/api/usage")
             r.raise_for_status()
             data = r.json()
-            usage = data.get("data", data)
-            return f"📊 Usage:\nStorage: {usage.get('storage', 'N/A')}\nMinutes: {usage.get('minutes', 'N/A')}"
+            usage = data.get("usage", {})
+            
+            result = "📊 Usage Statistics:\n\n"
+            result += f"💾 Storage: {usage.get('storageUsed', 0) / 1024 / 1024 / 1024:.2f} GB\n"
+            result += f"⏱️  Minutes: {usage.get('minutesUsed', 0)} / {usage.get('minutesLimit', 0)}\n"
+            result += f"📹 Files: {usage.get('filesCount', 0)}\n"
+            
+            return result
         
         return f"❌ Unknown tool: {name}"
     
     except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP {e.response.status_code}: {e.response.text[:300]}")
-        return f"❌ API Error ({e.response.status_code})"
+        logger.error(f"HTTP {e.response.status_code}: {e.response.text[:500]}")
+        return f"❌ API Error ({e.response.status_code}): {e.response.text[:200]}"
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+        logger.error(f"Error in {name}: {e}", exc_info=True)
         return f"❌ Error: {str(e)}"
 
+# FastAPI endpoints
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "team_id": SCREENAPP_TEAM_ID, "tools": len(TOOLS)}
+    return {
+        "status": "healthy",
+        "team_id": TEAM_ID,
+        "tools": len(TOOLS),
+        "service": "screenapp-mcp"
+    }
 
 @app.get("/")
 async def root():
-    return {"service": "screenapp-mcp", "version": "1.0.0", "tools": len(TOOLS)}
+    return {
+        "service": "screenapp-mcp",
+        "version": "1.0.0",
+        "tools": len(TOOLS),
+        "endpoints": {
+            "mcp": "/mcp",
+            "health": "/health"
+        }
+    }
 
 @app.get("/.well-known/oauth-protected-resource")
 async def oauth_resource():
@@ -321,11 +374,14 @@ async def mcp_endpoint(request: Request):
     try:
         body = await request.json()
         method = body.get("method")
+        req_id = body.get("id")
+        
+        logger.info(f"MCP request: {method}")
         
         if method == "tools/list":
             return {
                 "jsonrpc": "2.0",
-                "id": body.get("id"),
+                "id": req_id,
                 "result": {"tools": TOOLS}
             }
         
@@ -334,11 +390,13 @@ async def mcp_endpoint(request: Request):
             name = params.get("name")
             arguments = params.get("arguments", {})
             
+            logger.info(f"Calling tool: {name} with args: {arguments}")
+            
             result = await execute_tool(name, arguments)
             
             return {
                 "jsonrpc": "2.0",
-                "id": body.get("id"),
+                "id": req_id,
                 "result": {
                     "content": [{"type": "text", "text": result}]
                 }
@@ -347,7 +405,7 @@ async def mcp_endpoint(request: Request):
         elif method == "initialize":
             return {
                 "jsonrpc": "2.0",
-                "id": body.get("id"),
+                "id": req_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
@@ -361,7 +419,7 @@ async def mcp_endpoint(request: Request):
         else:
             return {
                 "jsonrpc": "2.0",
-                "id": body.get("id"),
+                "id": req_id,
                 "error": {
                     "code": -32601,
                     "message": f"Method not found: {method}"
@@ -369,14 +427,20 @@ async def mcp_endpoint(request: Request):
             }
     
     except Exception as e:
-        logger.error(f"MCP error: {e}")
+        logger.error(f"MCP error: {e}", exc_info=True)
         return {
             "jsonrpc": "2.0",
-            "id": body.get("id", None),
-            "error": {"code": -32603, "message": str(e)}
+            "id": body.get("id"),
+            "error": {
+                "code": -32603,
+                "message": str(e)
+            }
         }
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
+    logger.info(f"Starting ScreenApp MCP Server on port {port}")
+    logger.info(f"Team ID: {TEAM_ID}")
+    logger.info(f"Tools available: {len(TOOLS)}")
     uvicorn.run(app, host="0.0.0.0", port=port)
