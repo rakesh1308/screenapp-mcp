@@ -1,10 +1,10 @@
 """
-ScreenApp MCP Server - Simple HTTP Implementation
+ScreenApp MCP Server - Complete Implementation
+Matches the official ScreenApp MCP with all tools
 """
 import os
 import logging
 import httpx
-from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,321 +40,279 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Tool definitions
+# Complete tool definitions matching ScreenApp MCP
 TOOLS = [
     {
-        "name": "list_files",
-        "description": "List all recordings/files in your ScreenApp account",
+        "name": "get_profile",
+        "description": "Get the current user's profile information",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "list_teams",
+        "description": "List all teams the user belongs to",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "get_team",
+        "description": "Get detailed information about a specific team",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "default": 20, "description": "Max number of files to return"}
+                "teamId": {"type": "string", "description": "The team ID"}
+            },
+            "required": ["teamId"]
+        }
+    },
+    {
+        "name": "list_recordings",
+        "description": "List recordings/files",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "number", "default": 20},
+                "offset": {"type": "number", "default": 0},
+                "teamId": {"type": "string"}
             }
         }
     },
     {
-        "name": "get_file",
-        "description": "Get details about a specific recording/file",
+        "name": "get_recording",
+        "description": "Get recording metadata",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file_id": {"type": "string", "description": "The file ID"}
+                "fileId": {"type": "string"}
             },
-            "required": ["file_id"]
+            "required": ["fileId"]
         }
     },
     {
-        "name": "get_transcript",
-        "description": "Get the full transcript of a recording",
+        "name": "search_recordings",
+        "description": "Search in transcripts",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file_id": {"type": "string", "description": "The file ID"}
+                "query": {"type": "string"},
+                "teamId": {"type": "string"}
             },
-            "required": ["file_id"]
+            "required": ["query", "teamId"]
         }
     },
     {
-        "name": "ask_ai",
-        "description": "Ask AI questions about a recording using multimodal analysis (transcript + video)",
+        "name": "assistant_search",
+        "description": "AI-powered search",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file_id": {"type": "string", "description": "The file ID"},
-                "question": {"type": "string", "description": "Your question about the recording"}
+                "query": {"type": "string"},
+                "teamId": {"type": "string"},
+                "limit": {"type": "number", "default": 10}
             },
-            "required": ["file_id", "question"]
+            "required": ["query", "teamId"]
         }
     },
     {
-        "name": "search_files",
-        "description": "Search recordings by name/title",
+        "name": "ask_recording",
+        "description": "Ask AI about a recording",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search term"},
-                "limit": {"type": "integer", "default": 10}
+                "fileId": {"type": "string"},
+                "question": {"type": "string"}
             },
-            "required": ["query"]
+            "required": ["fileId", "question"]
         }
     },
     {
-        "name": "add_file_tag",
-        "description": "Add a tag/label to a recording",
+        "name": "ask_multiple_recordings",
+        "description": "Ask AI across multiple recordings",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file_id": {"type": "string"},
-                "key": {"type": "string", "description": "Tag key (e.g., 'category', 'priority')"},
-                "value": {"type": "string", "description": "Tag value (e.g., 'meeting', 'high')"}
+                "question": {"type": "string"},
+                "teamId": {"type": "string"},
+                "fileIds": {"type": "array", "items": {"type": "string"}}
             },
-            "required": ["file_id", "key", "value"]
+            "required": ["question", "teamId"]
         }
     },
     {
-        "name": "remove_file_tag",
-        "description": "Remove a tag from a recording",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "file_id": {"type": "string"},
-                "key": {"type": "string", "description": "Tag key to remove"}
-            },
-            "required": ["file_id", "key"]
-        }
-    },
-    {
-        "name": "register_webhook",
-        "description": "Register a webhook URL to receive recording events",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "Your webhook URL"},
-                "name": {"type": "string", "description": "Webhook name"}
-            },
-            "required": ["url", "name"]
-        }
-    },
-    {
-        "name": "upload_from_url",
-        "description": "Upload a video/audio file from a public URL",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "file_url": {"type": "string", "description": "Public URL of the file"},
-                "filename": {"type": "string", "description": "Desired filename"},
-                "folder_id": {"type": "string", "default": "default", "description": "Folder ID to upload to"}
-            },
-            "required": ["file_url", "filename"]
-        }
+        "name": "get_usage_stats",
+        "description": "Get usage statistics",
+        "inputSchema": {"type": "object", "properties": {}}
     }
 ]
 
 async def execute_tool(name: str, args: dict) -> str:
     """Execute a tool"""
     try:
-        if name == "list_files":
-            limit = args.get("limit", 20)
-            r = await client.get(f"{BASE_URL}/v2/files", params={"limit": limit})
+        if name == "get_profile":
+            r = await client.get(f"{BASE_URL}/v2/account/profile")
             r.raise_for_status()
             data = r.json()
+            user = data.get("data", data)
+            return f"👤 Profile:\nName: {user.get('name', 'N/A')}\nEmail: {user.get('email', 'N/A')}"
+        
+        elif name == "list_teams":
+            r = await client.get(f"{BASE_URL}/v2/teams")
+            r.raise_for_status()
+            data = r.json()
+            teams = data.get("teams", data.get("data", []))
             
+            if not teams:
+                return "No teams found"
+            
+            result = f"👥 Teams ({len(teams)}):\n\n"
+            for i, t in enumerate(teams, 1):
+                result += f"{i}. {t.get('name', 'Untitled')}\n"
+                result += f"   ID: {t.get('teamId') or t.get('id')}\n\n"
+            return result
+        
+        elif name == "get_team":
+            tid = args["teamId"]
+            r = await client.get(f"{BASE_URL}/v2/team/{tid}")
+            r.raise_for_status()
+            data = r.json()
+            team = data.get("data", data)
+            return f"👥 Team: {team.get('name', 'Untitled')}\nID: {team.get('id')}\nMembers: {team.get('memberCount', 'N/A')}"
+        
+        elif name == "list_recordings":
+            limit = args.get("limit", 20)
+            offset = args.get("offset", 0)
+            team_id = args.get("teamId", SCREENAPP_TEAM_ID)
+            
+            r = await client.get(f"{BASE_URL}/v2/files", params={"limit": limit, "offset": offset})
+            r.raise_for_status()
+            data = r.json()
             files = data.get("files", data.get("data", []))
             
             if not files:
-                return """📹 No recordings found.
-
-ℹ️  Possible reasons:
-• You haven't created any recordings yet
-• Recordings are in a different team
-• Try creating a recording at https://screenapp.io/app
-
-💡 Use the 'upload_from_url' tool to upload a file"""
+                return "📹 No recordings found.\n\n💡 Create one at https://screenapp.io/app"
             
-            result = f"📹 Found {len(files)} files:\n\n"
-            for i, f in enumerate(files[:limit], 1):
+            result = f"📹 Recordings ({len(files)}):\n\n"
+            for i, f in enumerate(files, 1):
                 name = f.get('name') or f.get('title') or 'Untitled'
-                file_id = f.get('id') or f.get('fileId')
-                duration = f.get('duration', 0)
-                created = f.get('createdAt', 'Unknown')
-                
-                result += f"{i}. {name}\n"
-                result += f"   📄 ID: {file_id}\n"
-                result += f"   ⏱️  Duration: {duration}s\n"
-                result += f"   📅 Created: {created}\n\n"
-            
+                fid = f.get('id') or f.get('fileId')
+                dur = f.get('duration', 0)
+                result += f"{i}. {name}\n   ID: {fid}\n   Duration: {dur}s\n\n"
             return result
         
-        elif name == "get_file":
-            fid = args["file_id"]
+        elif name == "get_recording":
+            fid = args["fileId"]
             r = await client.get(f"{BASE_URL}/v2/files/{fid}")
             r.raise_for_status()
             data = r.json()
             rec = data.get("data", data)
             
             name = rec.get('name') or rec.get('title') or 'Untitled'
-            status = rec.get('status', 'unknown')
-            duration = rec.get('duration', 0)
-            url = rec.get('url') or rec.get('videoUrl')
-            has_transcript = rec.get('hasTranscript', False)
+            return f"📹 {name}\nID: {rec.get('id')}\nDuration: {rec.get('duration', 0)}s\nStatus: {rec.get('status', 'unknown')}"
+        
+        elif name == "search_recordings":
+            query = args["query"]
+            team_id = args["teamId"]
             
-            result = f"📹 {name}\n\n"
-            result += f"📄 ID: {rec.get('id')}\n"
-            result += f"📊 Status: {status}\n"
-            result += f"⏱️  Duration: {duration}s\n"
-            result += f"📝 Transcript: {'✓ Available' if has_transcript else '⏳ Processing'}\n"
-            if url:
-                result += f"🔗 URL: {url}\n"
+            # Use ScreenApp search API
+            r = await client.post(
+                f"{BASE_URL}/v2/search",
+                json={"query": query, "teamId": team_id}
+            )
+            r.raise_for_status()
+            data = r.json()
+            results = data.get("results", data.get("data", []))
             
+            if not results:
+                return f"🔍 No results for '{query}'"
+            
+            result = f"🔍 Found {len(results)} results:\n\n"
+            for i, r in enumerate(results[:10], 1):
+                result += f"{i}. {r.get('title', 'Untitled')}\n   Snippet: {r.get('snippet', '')[:100]}\n\n"
             return result
         
-        elif name == "get_transcript":
-            fid = args["file_id"]
-            r = await client.get(f"{BASE_URL}/v2/files/{fid}/transcript")
+        elif name == "assistant_search":
+            query = args["query"]
+            team_id = args["teamId"]
+            limit = args.get("limit", 10)
+            
+            r = await client.post(
+                f"{BASE_URL}/v2/assistant/search",
+                json={"query": query, "teamId": team_id, "limit": limit}
+            )
             r.raise_for_status()
             data = r.json()
             
-            transcript_data = data.get("data", data)
-            segments = transcript_data.get("segments", transcript_data.get("transcript", {}).get("segments", []))
+            answer = data.get("answer", "No answer")
+            results = data.get("results", [])
             
-            if not segments:
-                return "⏳ Transcript not ready. The recording may still be processing."
-            
-            result = f"📄 Transcript ({len(segments)} segments)\n\n"
-            for seg in segments[:100]:
-                speaker = seg.get('speaker', 'Unknown')
-                text = seg.get('text', '').strip()
-                timestamp = seg.get('start', 0)
-                
-                mins = int(timestamp // 60)
-                secs = int(timestamp % 60)
-                result += f"[{mins:02d}:{secs:02d}] {speaker}: {text}\n"
-            
-            if len(segments) > 100:
-                result += f"\n📊 ... and {len(segments) - 100} more segments"
-            
+            result = f"🤖 AI Answer:\n{answer}\n\n"
+            if results:
+                result += f"📚 Sources ({len(results)}):\n"
+                for i, r in enumerate(results[:5], 1):
+                    result += f"{i}. {r.get('title', 'Untitled')}\n"
             return result
         
-        elif name == "ask_ai":
-            fid = args["file_id"]
+        elif name == "ask_recording":
+            fid = args["fileId"]
             question = args["question"]
             
             r = await client.post(
                 f"{BASE_URL}/v2/files/{fid}/ask/multimodal",
-                json={
-                    "promptText": question,
-                    "mediaAnalysisOptions": {
-                        "transcript": {
-                            "segments": [{"start": 0, "end": 999999}]
-                        }
-                    }
-                }
+                json={"promptText": question}
             )
             r.raise_for_status()
             data = r.json()
-            
-            answer = data.get('answer') or data.get('data', {}).get('answer', 'No response')
-            return f"🤖 AI Answer:\n\n{answer}"
+            return f"🤖 {data.get('answer', 'No answer')}"
         
-        elif name == "search_files":
-            query = args["query"]
-            limit = args.get("limit", 10)
+        elif name == "ask_multiple_recordings":
+            question = args["question"]
+            team_id = args["teamId"]
+            file_ids = args.get("fileIds", [])
             
-            r = await client.get(f"{BASE_URL}/v2/files", params={"limit": 100})
+            r = await client.post(
+                f"{BASE_URL}/v2/team/{team_id}/ask/multimodal",
+                json={"promptText": question, "fileIds": file_ids}
+            )
             r.raise_for_status()
             data = r.json()
-            files = data.get("files", data.get("data", []))
-            
-            matches = [f for f in files if query.lower() in (f.get('name') or f.get('title') or '').lower()]
-            
-            if not matches:
-                return f"🔍 No files found matching '{query}'"
-            
-            result = f"🔍 Found {len(matches)} matches:\n\n"
-            for i, f in enumerate(matches[:limit], 1):
-                name = f.get('name') or f.get('title') or 'Untitled'
-                file_id = f.get('id') or f.get('fileId')
-                result += f"{i}. {name}\n   📄 ID: {file_id}\n\n"
-            
-            return result
+            return f"🤖 {data.get('answer', 'No answer')}"
         
-        elif name == "add_file_tag":
-            fid = args["file_id"]
-            key = args["key"]
-            value = args["value"]
-            
-            r = await client.post(
-                f"{BASE_URL}/v2/files/{fid}/tag",
-                json={"key": key, "value": value}
-            )
+        elif name == "get_usage_stats":
+            r = await client.get(f"{BASE_URL}/v2/usage")
             r.raise_for_status()
-            return f"✅ Added tag '{key}={value}' to file {fid}"
-        
-        elif name == "remove_file_tag":
-            fid = args["file_id"]
-            key = args["key"]
-            
-            r = await client.request(
-                "DELETE",
-                f"{BASE_URL}/v2/files/{fid}/tag",
-                json={"key": key}
-            )
-            r.raise_for_status()
-            return f"✅ Removed tag '{key}' from file {fid}"
-        
-        elif name == "register_webhook":
-            url = args["url"]
-            name_val = args["name"]
-            
-            r = await client.post(
-                f"{BASE_URL}/v2/team/{SCREENAPP_TEAM_ID}/integrations/webhook",
-                json={"url": url, "name": name_val}
-            )
-            r.raise_for_status()
-            return f"✅ Webhook registered:\nURL: {url}\nName: {name_val}"
-        
-        elif name == "upload_from_url":
-            file_url = args["file_url"]
-            filename = args["filename"]
-            folder_id = args.get("folder_id", "default")
-            
-            # First get upload URL
-            r = await client.post(
-                f"{BASE_URL}/v2/files/upload/{SCREENAPP_TEAM_ID}/{folder_id}/url",
-                json={
-                    "files": [{
-                        "contentType": "video/mp4",
-                        "name": filename
-                    }]
-                }
-            )
-            r.raise_for_status()
-            upload_data = r.json()
-            
-            return f"✅ Upload initiated for: {filename}\n\n📋 Upload data:\n{upload_data}"
+            data = r.json()
+            usage = data.get("data", data)
+            return f"📊 Usage:\nStorage: {usage.get('storage', 'N/A')}\nMinutes: {usage.get('minutes', 'N/A')}"
         
         return f"❌ Unknown tool: {name}"
     
     except httpx.HTTPStatusError as e:
-        error_text = e.response.text[:300]
-        logger.error(f"HTTP {e.response.status_code}: {error_text}")
-        return f"❌ API Error ({e.response.status_code}):\n\n{error_text}"
+        logger.error(f"HTTP {e.response.status_code}: {e.response.text[:300]}")
+        return f"❌ API Error ({e.response.status_code})"
     except Exception as e:
-        logger.error(f"Tool error: {e}", exc_info=True)
+        logger.error(f"Error: {e}", exc_info=True)
         return f"❌ Error: {str(e)}"
 
 @app.get("/health")
 async def health():
     return {"status": "healthy", "team_id": SCREENAPP_TEAM_ID, "tools": len(TOOLS)}
 
+@app.get("/")
+async def root():
+    return {"service": "screenapp-mcp", "version": "1.0.0", "tools": len(TOOLS)}
+
+@app.get("/.well-known/oauth-protected-resource")
+async def oauth_resource():
+    return {"issuer": "https://screenapp.io", "mcp_endpoint": "/mcp"}
+
+@app.get("/.well-known/oauth-protected-resource/mcp")
+async def oauth_mcp():
+    return {"mcp_endpoint": "/mcp", "methods": ["POST"]}
+
 @app.options("/mcp")
 async def mcp_options():
-    """Handle CORS preflight"""
     return JSONResponse({"status": "ok"})
 
 @app.head("/mcp")
 async def mcp_head():
-    """Handle HEAD requests"""
     return JSONResponse({"status": "ready"})
 
 @app.post("/mcp")
@@ -392,9 +350,7 @@ async def mcp_endpoint(request: Request):
                 "id": body.get("id"),
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {}
-                    },
+                    "capabilities": {"tools": {}},
                     "serverInfo": {
                         "name": "screenapp-mcp",
                         "version": "1.0.0"
