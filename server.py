@@ -258,7 +258,7 @@ async def execute_tool(name: str, args: dict) -> str:
                 request_body["mediaAnalysisOptions"] = media_options
             
             r = await client.post(
-                f"{BASE_URL}/files/{file_id}/ask/multimodal",
+                f"{BASE_URL}/v2/files/{file_id}/ask/multimodal",
                 json=request_body
             )
             r.raise_for_status()
@@ -269,7 +269,7 @@ async def execute_tool(name: str, args: dict) -> str:
         # FILE TAGS
         elif name == "add_file_tag":
             r = await client.post(
-                f"{BASE_URL}/files/{args['fileId']}/tag",
+                f"{BASE_URL}/v2/files/{args['fileId']}/tag",
                 json={"key": args["key"], "value": args["value"]}
             )
             r.raise_for_status()
@@ -277,7 +277,7 @@ async def execute_tool(name: str, args: dict) -> str:
         
         elif name == "remove_file_tag":
             r = await client.delete(
-                f"{BASE_URL}/files/{args['fileId']}/tag",
+                f"{BASE_URL}/v2/files/{args['fileId']}/tag",
                 json={"key": args["key"]}
             )
             r.raise_for_status()
@@ -287,7 +287,7 @@ async def execute_tool(name: str, args: dict) -> str:
         elif name == "add_team_tag":
             team_id = args.get("teamId", TEAM_ID)
             r = await client.post(
-                f"{BASE_URL}/team/{team_id}/tag",
+                f"{BASE_URL}/v2/team/{team_id}/tag",
                 json={"key": args["key"], "value": args["value"]}
             )
             r.raise_for_status()
@@ -296,7 +296,7 @@ async def execute_tool(name: str, args: dict) -> str:
         elif name == "remove_team_tag":
             team_id = args.get("teamId", TEAM_ID)
             r = await client.delete(
-                f"{BASE_URL}/team/{team_id}/tag",
+                f"{BASE_URL}/v2/team/{team_id}/tag",
                 json={"key": args["key"]}
             )
             r.raise_for_status()
@@ -306,7 +306,7 @@ async def execute_tool(name: str, args: dict) -> str:
         elif name == "register_team_webhook":
             team_id = args.get("teamId", TEAM_ID)
             r = await client.post(
-                f"{BASE_URL}/team/{team_id}/integrations/webhook",
+                f"{BASE_URL}/v2/team/{team_id}/integrations/webhook",
                 json={"url": args["url"], "name": args["name"]}
             )
             r.raise_for_status()
@@ -319,7 +319,7 @@ async def execute_tool(name: str, args: dict) -> str:
         elif name == "unregister_team_webhook":
             team_id = args.get("teamId", TEAM_ID)
             r = await client.delete(
-                f"{BASE_URL}/team/{team_id}/integrations/webhook",
+                f"{BASE_URL}/v2/team/{team_id}/integrations/webhook",
                 params={"url": args["url"]}
             )
             r.raise_for_status()
@@ -328,7 +328,7 @@ async def execute_tool(name: str, args: dict) -> str:
         # USER WEBHOOKS
         elif name == "register_user_webhook":
             r = await client.post(
-                f"{BASE_URL}/integrations/webhook",
+                f"{BASE_URL}/v2/integrations/webhook",
                 json={"url": args["url"], "name": args["name"]}
             )
             r.raise_for_status()
@@ -339,7 +339,7 @@ async def execute_tool(name: str, args: dict) -> str:
         
         elif name == "unregister_user_webhook":
             r = await client.delete(
-                f"{BASE_URL}/integrations/webhook",
+                f"{BASE_URL}/v2/integrations/webhook",
                 params={"url": args["url"]}
             )
             r.raise_for_status()
@@ -357,7 +357,7 @@ async def execute_tool(name: str, args: dict) -> str:
         elif name == "update_profile":
             profile_data = {k: v for k, v in args.items() if v is not None}
             r = await client.put(
-                f"{BASE_URL}/account/profile",
+                f"{BASE_URL}/v2/account/profile",
                 json=profile_data
             )
             r.raise_for_status()
@@ -367,7 +367,7 @@ async def execute_tool(name: str, args: dict) -> str:
         elif name == "get_upload_url":
             folder_id = args.get("folderId", "__default")
             r = await client.post(
-                f"{BASE_URL}/files/upload/{TEAM_ID}/{folder_id}/url",
+                f"{BASE_URL}/v2/files/upload/{TEAM_ID}/{folder_id}/url",
                 json={
                     "files": [{
                         "contentType": args["contentType"],
@@ -393,7 +393,7 @@ async def execute_tool(name: str, args: dict) -> str:
         elif name == "init_multipart_upload":
             folder_id = args.get("folderId", "__default")
             r = await client.put(
-                f"{BASE_URL}/files/upload/multipart/init/{TEAM_ID}/{folder_id}",
+                f"{BASE_URL}/v2/files/upload/multipart/init/{TEAM_ID}/{folder_id}",
                 json={"contentType": args["contentType"]}
             )
             r.raise_for_status()
