@@ -1,16 +1,9 @@
 FROM python:3.11-slim
-
 WORKDIR /app
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-COPY server_single.py .
-
+COPY server.py .
 ENV SCREENAPP_API_TOKEN=""
 ENV SCREENAPP_TEAM_ID=""
-ENV SCREENAPP_FOLDER_ID="default"
-
 EXPOSE 8000
-
-CMD ["python", "-u", "server_single.py"]
+CMD ["python", "-u", "server.py"]

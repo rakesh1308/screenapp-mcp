@@ -1,48 +1,31 @@
-# Deploy ScreenApp MCP Server
+# Deploy
 
 ## Files
-- `server_single.py` - Complete MCP server (one file)
-- `Dockerfile` - Container config
-- `requirements.txt` - Dependencies
+- server.py (200 lines - complete MCP server)
+- Dockerfile  
+- requirements.txt
 
 ## Deploy to Zeabur
+1. Push to GitHub
+2. Import in Zeabur
+3. Set env vars: SCREENAPP_API_TOKEN, SCREENAPP_TEAM_ID
+4. Deploy
 
-1. **Push to GitHub**
-```bash
-git init
-git add server_single.py Dockerfile requirements.txt
-git commit -m "ScreenApp MCP"
-git push
-```
-
-2. **In Zeabur Dashboard**
-- New Project → GitHub
-- Select repo
-- Set env vars:
-  - `SCREENAPP_API_TOKEN`
-  - `SCREENAPP_TEAM_ID`
-- Deploy
-
-3. **Configure Claude Desktop**
-
-Add to `claude_desktop_config.json`:
-
+## Claude Config
 ```json
 {
   "mcpServers": {
     "screenapp": {
-      "transport": {
-        "type": "sse",
-        "url": "https://your-app.zeabur.app/sse"
-      }
+      "url": "https://your-app.zeabur.app/mcp"
     }
   }
 }
 ```
 
-4. **Test**
+## Test
 ```bash
 curl https://your-app.zeabur.app/health
+curl -X POST https://your-app.zeabur.app/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
-
-Done!
