@@ -265,12 +265,20 @@ async def execute_tool(name: str, args: dict) -> str:
             r.raise_for_status()
             data = r.json()
             
-            # API returns {"answer": "...", "sessionId": "..."}
-            answer = data.get("answer", "")
+            # API returns nested structure:
+            # {"success": true, "data": {"sessionId": "...", "answer": {"role": "assistant", "content": "..."}}}
+            answer = None
+            
+            if data.get("success") and data.get("data"):
+                answer_obj = data["data"].get("answer", {})
+                if isinstance(answer_obj, dict):
+                    answer = answer_obj.get("content", "")
+                elif isinstance(answer_obj, str):
+                    answer = answer_obj
             
             if not answer:
                 logger.error(f"Empty answer from API. Full response: {data}")
-                return f"❌ No answer generated. API response: {data}"
+                return f"❌ No answer generated. Please check if the file has a transcript."
             
             return f"🤖 AI Answer:\n\n{answer}"
         
