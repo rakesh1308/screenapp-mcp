@@ -4,6 +4,7 @@ Based on: https://screenapp.io/help/api-documentation
 All endpoints verified from official docs
 """
 import os
+import json
 import logging
 import httpx
 from fastapi import FastAPI, Request
@@ -478,57 +479,208 @@ async def mcp_head():
 
 @app.post("/mcp")
 async def mcp_endpoint(request: Request):
-    """MCP JSON-RPC endpoint"""
+    """MCP JSON-RPC endpoint - Full MCP Protocol Support"""
     try:
         body = await request.json()
         method = body.get("method")
         req_id = body.get("id")
+        params = body.get("params", {})
         
-        logger.info(f"MCP request: {method}")
+        logger.info(f"MCP request: method={method}, id={req_id}")
         
-        if method == "tools/list":
-            return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+        # =====================================================================
+        # CORE MCP PROTOCOL METHODS
+        # =====================================================================
         
-        elif method == "tools/call":
-            params = body.get("params", {})
-            name = params.get("name")
-            arguments = params.get("arguments", {})
+        # Initialize - Required first method
+        if method == "initialize":
+            # Get client protocol version, default to latest if not provided
+            client_version = params.get("protocolVersion", "2024-11-05")
             
-            logger.info(f"Tool call: {name}")
-            result = await execute_tool(name, arguments)
-            
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {"content": [{"type": "text", "text": result}]}
-            }
-        
-        elif method == "initialize":
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
+                    "capabilities": {
+                        "tools": {},  # We support tools
+                        "prompts": {},  # We support prompts
+                        "resources": {},  # We support resources
+                    },
                     "serverInfo": {
-                        "name": "screenapp-mcp-official",
+                        "name": "screenapp-mcp",
                         "version": "1.0.0"
+                    },
+                    "instructions": "ScreenApp MCP Server - Access ScreenApp.io recordings, tags, webhooks, and AI analysis"
+                }
+            }
+        
+        # Ping - Required for health checks (Anything LLM and others use this)
+        elif method == "ping":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": None  # ping returns null/empty result
+            }
+        
+        # Notifications/initialized - Client signals initialization complete
+        elif method == "notifications/initialized":
+            # This is a notification (no id), should return empty response
+            return JSONResponse(status_code=202, content={})
+        
+        # =====================================================================
+        # TOOLS PROTOCOL
+        # =====================================================================
+        
+        elif method == "tools/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "tools": TOOLS
+                }
+            }
+        
+        elif method == "tools/call":
+            name = params.get("name")
+            arguments = params.get("arguments", {})
+            
+            logger.info(f"Tool call: {name} with args: {list(arguments.keys())}")
+            
+            if not name:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32602, "message": "Missing tool name"}
+                }
+            
+            result = await execute_tool(name, arguments)
+            
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": result
+                        }
+                    ],
+                    "isError": result.startswith("❌")
+                }
+            }
+        
+        # =====================================================================
+        # PROMPTS PROTOCOL (Optional but required for some clients)
+        # =====================================================================
+        
+        elif method == "prompts/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "prompts": []
+                }
+            }
+        
+        # =====================================================================
+        # RESOURCES PROTOCOL (Optional but required for some clients)
+        # =====================================================================
+        
+        elif method == "resources/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "resources": []
+                }
+            }
+        
+        elif method == "resources/templates/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "resourceTemplates": []
+                }
+            }
+        
+        # =====================================================================
+        # ROOTS/LOCATIONS PROTOCOL
+        # =====================================================================
+        
+        elif method == "roots/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "roots": []
+                }
+            }
+        
+        # =====================================================================
+        # SAMPLING PROTOCOL (Optional)
+        # =====================================================================
+        
+        elif method == "sampling/createMessage":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {
+                    "code": -32601,
+                    "message": "Sampling not supported"
+                }
+            }
+        
+        # =====================================================================
+        # COMPLETION PROTOCOL (Optional)
+        # =====================================================================
+        
+        elif method == "completion/complete":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "completion": {
+                        "items": []
                     }
                 }
             }
         
+        # =====================================================================
+        # UNKNOWN METHOD - Return method not found error
+        # =====================================================================
+        
+        else:
+            logger.warning(f"Unknown MCP method: {method}")
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {
+                    "code": -32601,
+                    "message": f"Method not found: {method}"
+                }
+            }
+    
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON: {e}")
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
+        }
+    except Exception as e:
+        logger.error(f"MCP error: {e}", exc_info=True)
+        req_id = None
+        try:
+            if 'body' in locals():
+                req_id = body.get("id")
+        except:
+            pass
         return {
             "jsonrpc": "2.0",
             "id": req_id,
-            "error": {"code": -32601, "message": f"Method not found: {method}"}
-        }
-    
-    except Exception as e:
-        logger.error(f"MCP error: {e}", exc_info=True)
-        return {
-            "jsonrpc": "2.0",
-            "id": body.get("id"),
-            "error": {"code": -32603, "message": str(e)}
+            "error": {"code": -32603, "message": f"Internal error: {str(e)}"}
         }
 
 if __name__ == "__main__":
