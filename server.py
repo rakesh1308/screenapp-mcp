@@ -307,6 +307,106 @@ TOOLS = [
             },
             "required": ["fileId"]
         }
+    },
+    
+    # Folder Management - List Files
+    {
+        "name": "list_folder_files",
+        "description": "List all files in a folder. Returns file IDs, names, durations, and status for all recordings in the specified folder.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folderId": {"type": "string", "default": "__default", "description": "Folder ID (use '__default' for root folder)"},
+                "cursor": {"type": "string", "description": "Pagination cursor for fetching next page of results"},
+                "limit": {"type": "integer", "default": 50, "description": "Maximum number of files to return (1-100)"}
+            }
+        }
+    },
+    
+    # Folder Management - Get All Transcripts
+    {
+        "name": "get_folder_transcripts",
+        "description": "Get transcripts for ALL files in a folder. Returns structured transcript data with speaker labels and timestamps for each file. Use this to analyze all recordings in a folder.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folderId": {"type": "string", "default": "__default", "description": "Folder ID (use '__default' for root folder)"},
+                "includeVideoUrl": {"type": "boolean", "default": False, "description": "Include video download URL for each file"},
+                "includeAudioUrl": {"type": "boolean", "default": False, "description": "Include audio download URL for each file"},
+                "maxFiles": {"type": "integer", "default": 20, "description": "Maximum number of files to process (to avoid timeouts)"}
+            }
+        }
+    },
+    
+    # Folder Management - List Sub-folders
+    {
+        "name": "list_folders",
+        "description": "List all sub-folders within a folder. Use to explore the folder hierarchy.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folderId": {"type": "string", "default": "__default", "description": "Parent folder ID (use '__default' for root)"},
+                "cursor": {"type": "string", "description": "Pagination cursor for fetching next page"}
+            }
+        }
+    },
+    
+    # File Management - Get File Info
+    {
+        "name": "get_file_info",
+        "description": "Get detailed information about a specific file including metadata, status, media URLs, and transcript.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fileId": {"type": "string", "description": "ID of the file"},
+                "includeVideoUrl": {"type": "boolean", "default": False, "description": "Include video download URL"},
+                "includeAudioUrl": {"type": "boolean", "default": False, "description": "Include audio download URL"}
+            },
+            "required": ["fileId"]
+        }
+    },
+    
+    # Discovery - Search All Recordings
+    {
+        "name": "search_recordings",
+        "description": "Search across all recordings in your entire library. Indexes files from all folders (recursively) and searches by name, transcript content, or tags. Use this to find specific recordings without knowing folder/file IDs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query (matches file name, transcript text, or tags)"},
+                "maxFiles": {"type": "integer", "default": 50, "description": "Maximum files to index and search (higher = slower but more thorough)"},
+                "includeTranscripts": {"type": "boolean", "default": True, "description": "Include transcript content in search"},
+                "folderId": {"type": "string", "description": "Optional: Start search from specific folder (default: all folders)"}
+            },
+            "required": ["query"]
+        }
+    },
+    
+    # Discovery - List All Folders (Recursive)
+    {
+        "name": "list_all_folders",
+        "description": "List ALL folders in your entire library recursively. Returns the complete folder hierarchy with file counts. Useful for exploring what content is available.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folderId": {"type": "string", "default": "__default", "description": "Starting folder (default: root)"},
+                "maxDepth": {"type": "integer", "default": 3, "description": "Maximum folder depth to traverse"},
+                "includeFileCounts": {"type": "boolean", "default": True, "description": "Include file counts per folder"}
+            }
+        }
+    },
+    
+    # Discovery - Index All Recordings
+    {
+        "name": "index_all_recordings",
+        "description": "Build a searchable index of all recordings across all folders. Returns summary of all files with names, IDs, and brief metadata. Use for discovery before detailed analysis.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "maxFiles": {"type": "integer", "default": 100, "description": "Maximum files to index"},
+                "includeStats": {"type": "boolean", "default": True, "description": "Include duration and status stats"}
+            }
+        }
     }
 ]
 
@@ -669,6 +769,543 @@ async def execute_tool(name: str, args: dict) -> str:
             else:
                 return f"❌ Failed to get file info: {data}"
         
+        # FOLDER MANAGEMENT - LIST FILES
+        elif name == "list_folder_files":
+            folder_id = args.get("folderId", "__default")
+            cursor = args.get("cursor")
+            limit = args.get("limit", 50)
+            
+            params = {"limit": min(limit, 100)}
+            if cursor:
+                params["cursor"] = cursor
+            
+            r = await client.get(
+                f"{BASE_URL}/v1/folders/{folder_id}/files",
+                params=params
+            )
+            r.raise_for_status()
+            data = r.json()
+            
+            if data.get("success") and data.get("data"):
+                files = data["data"]
+                result_lines = [f"📁 Folder Files (Folder ID: {folder_id})"]
+                result_lines.append(f"📊 Total files: {len(files)}")
+                result_lines.append("")
+                
+                for i, file_info in enumerate(files, 1):
+                    file_id = file_info.get("id", "unknown")
+                    name = file_info.get("name", "Untitled")
+                    duration = file_info.get("duration", 0)
+                    status = file_info.get("status", "unknown")
+                    created = file_info.get("createdAt", "")
+                    
+                    result_lines.append(f"{i}. 📄 {name}")
+                    result_lines.append(f"   ID: {file_id}")
+                    result_lines.append(f"   Duration: {duration}s | Status: {status}")
+                    if created:
+                        result_lines.append(f"   Created: {created}")
+                    result_lines.append("")
+                
+                # Pagination info
+                if "cursor" in data:
+                    result_lines.append(f"📍 Next page cursor: {data['cursor']}")
+                    result_lines.append(f"   Use: list_folder_files with cursor=\"{data['cursor']}\"")
+                
+                return "\n".join(result_lines)
+            else:
+                return f"❌ Failed to list folder files: {data}"
+        
+        # FOLDER MANAGEMENT - GET ALL TRANSCRIPTS
+        elif name == "get_folder_transcripts":
+            folder_id = args.get("folderId", "__default")
+            include_video = args.get("includeVideoUrl", False)
+            include_audio = args.get("includeAudioUrl", False)
+            max_files = args.get("maxFiles", 20)
+            
+            # First, list all files in the folder
+            params = {"limit": min(max_files, 50)}
+            r = await client.get(
+                f"{BASE_URL}/v1/folders/{folder_id}/files",
+                params=params
+            )
+            r.raise_for_status()
+            data = r.json()
+            
+            if not (data.get("success") and data.get("data")):
+                return f"❌ Failed to list folder files: {data}"
+            
+            files = data["data"][:max_files]
+            result_lines = [f"📁 Folder Transcripts (Folder ID: {folder_id})"]
+            result_lines.append(f"📊 Processing {len(files)} files...")
+            result_lines.append("=" * 60)
+            
+            for i, file_info in enumerate(files, 1):
+                file_id = file_info.get("id", "")
+                name = file_info.get("name", "Untitled")
+                
+                if not file_id:
+                    continue
+                
+                result_lines.append("")
+                result_lines.append(f"📄 [{i}/{len(files)}] {name}")
+                result_lines.append(f"   File ID: {file_id}")
+                
+                # Get transcript for this file
+                file_params = {}
+                if include_video:
+                    file_params["video"] = "true"
+                if include_audio:
+                    file_params["audio"] = "true"
+                
+                try:
+                    file_r = await client.get(
+                        f"{BASE_URL}/v2/files/{file_id}",
+                        params=file_params
+                    )
+                    file_r.raise_for_status()
+                    file_data = file_r.json()
+                    
+                    if file_data.get("success") and file_data.get("data"):
+                        fd = file_data["data"]
+                        
+                        if "duration" in fd:
+                            result_lines.append(f"   ⏱️  Duration: {fd['duration']}s")
+                        if "status" in fd:
+                            result_lines.append(f"   📊 Status: {fd['status']}")
+                        
+                        # Media URLs
+                        if include_video and fd.get("videoUrl"):
+                            result_lines.append(f"   🎬 Video: {fd['videoUrl']}")
+                        if include_audio and fd.get("audioUrl"):
+                            result_lines.append(f"   🎵 Audio: {fd['audioUrl']}")
+                        
+                        # Transcript
+                        if fd.get("transcript"):
+                            transcript = fd["transcript"]
+                            result_lines.append("")
+                            result_lines.append("   📜 Transcript:")
+                            result_lines.append("   " + "-" * 40)
+                            
+                            if isinstance(transcript, str):
+                                result_lines.append(f"   {transcript}")
+                            elif isinstance(transcript, dict):
+                                if "text" in transcript:
+                                    result_lines.append(f"   {transcript['text']}")
+                                if "segments" in transcript:
+                                    for seg in transcript["segments"][:5]:
+                                        start = seg.get("start", 0)
+                                        end = seg.get("end", 0)
+                                        text = seg.get("text", "")
+                                        speaker = seg.get("speaker", "Unknown")
+                                        result_lines.append(f"   [{start:.0f}s] {speaker}: {text}")
+                                    if len(transcript["segments"]) > 5:
+                                        result_lines.append(f"   ... and {len(transcript['segments']) - 5} more segments")
+                            result_lines.append("   " + "-" * 40)
+                        elif fd.get("transcriptUrl"):
+                            result_lines.append(f"   📄 Transcript URL: {fd['transcriptUrl']}")
+                        else:
+                            result_lines.append("   ⚠️  No transcript available")
+                    else:
+                        result_lines.append(f"   ❌ Failed to get file data")
+                        
+                except Exception as e:
+                    result_lines.append(f"   ❌ Error: {str(e)}")
+            
+            result_lines.append("")
+            result_lines.append("=" * 60)
+            result_lines.append(f"✅ Processed {len(files)} files from folder {folder_id}")
+            
+            return "\n".join(result_lines)
+        
+        # FOLDER MANAGEMENT - LIST SUB-FOLDERS
+        elif name == "list_folders":
+            folder_id = args.get("folderId", "__default")
+            cursor = args.get("cursor")
+            
+            params = {}
+            if cursor:
+                params["cursor"] = cursor
+            
+            r = await client.get(
+                f"{BASE_URL}/v1/folders/{folder_id}/folders",
+                params=params
+            )
+            r.raise_for_status()
+            data = r.json()
+            
+            if data.get("success") and data.get("data"):
+                folders = data["data"]
+                result_lines = [f"📂 Sub-folders in: {folder_id}"]
+                result_lines.append(f"📊 Total sub-folders: {len(folders)}")
+                result_lines.append("")
+                
+                for i, folder_info in enumerate(folders, 1):
+                    folder_id_out = folder_info.get("id", "unknown")
+                    name = folder_info.get("name", "Untitled Folder")
+                    file_count = folder_info.get("fileCount", folder_info.get("file_count", 0))
+                    created = folder_info.get("createdAt", "")
+                    
+                    result_lines.append(f"{i}. 📁 {name}")
+                    result_lines.append(f"   Folder ID: {folder_id_out}")
+                    result_lines.append(f"   Files: {file_count}")
+                    if created:
+                        result_lines.append(f"   Created: {created}")
+                    result_lines.append("")
+                
+                # Pagination
+                if "cursor" in data:
+                    result_lines.append(f"📍 Next page cursor: {data['cursor']}")
+                
+                return "\n".join(result_lines)
+            else:
+                return f"❌ Failed to list folders: {data}"
+        
+        # FILE MANAGEMENT - GET FILE INFO
+        elif name == "get_file_info":
+            file_id = args["fileId"]
+            include_video = args.get("includeVideoUrl", False)
+            include_audio = args.get("includeAudioUrl", False)
+            
+            params = {}
+            if include_video:
+                params["video"] = "true"
+            if include_audio:
+                params["audio"] = "true"
+            
+            r = await client.get(
+                f"{BASE_URL}/v2/files/{file_id}",
+                params=params
+            )
+            r.raise_for_status()
+            data = r.json()
+            
+            if data.get("success") and data.get("data"):
+                fd = data["data"]
+                
+                result_lines = [f"📄 File Info (ID: {file_id})"]
+                result_lines.append("=" * 50)
+                result_lines.append("")
+                
+                # Basic metadata
+                if "name" in fd:
+                    result_lines.append(f"📝 Name: {fd['name']}")
+                if "id" in fd:
+                    result_lines.append(f"🔑 ID: {fd['id']}")
+                if "duration" in fd:
+                    result_lines.append(f"⏱️  Duration: {fd['duration']} seconds")
+                if "status" in fd:
+                    result_lines.append(f"📊 Status: {fd['status']}")
+                if "format" in fd:
+                    result_lines.append(f"🎬 Format: {fd['format']}")
+                if "createdAt" in fd:
+                    result_lines.append(f"🗓️  Created: {fd['createdAt']}")
+                if "updatedAt" in fd:
+                    result_lines.append(f"🔄 Updated: {fd['updatedAt']}")
+                
+                # Media URLs
+                if include_video and fd.get("videoUrl"):
+                    result_lines.append("")
+                    result_lines.append("🎬 Video URL:")
+                    result_lines.append(f"   {fd['videoUrl']}")
+                
+                if include_audio and fd.get("audioUrl"):
+                    result_lines.append("")
+                    result_lines.append("🎵 Audio URL:")
+                    result_lines.append(f"   {fd['audioUrl']}")
+                
+                # Tags
+                if "tags" in fd and fd["tags"]:
+                    result_lines.append("")
+                    result_lines.append("🏷️  Tags:")
+                    for tag in fd["tags"]:
+                        result_lines.append(f"   - {tag.get('key')}: {tag.get('value')}")
+                
+                # Transcript
+                if fd.get("transcript"):
+                    transcript = fd["transcript"]
+                    result_lines.append("")
+                    result_lines.append("📜 Transcript:")
+                    result_lines.append("-" * 50)
+                    
+                    if isinstance(transcript, str):
+                        result_lines.append(transcript)
+                    elif isinstance(transcript, dict):
+                        if "text" in transcript:
+                            result_lines.append(transcript["text"])
+                        if "segments" in transcript:
+                            result_lines.append("")
+                            for seg in transcript["segments"][:20]:
+                                start = seg.get("start", 0)
+                                end = seg.get("end", 0)
+                                text = seg.get("text", "")
+                                speaker = seg.get("speaker", "Unknown")
+                                result_lines.append(f"[{start:.0f}s-{end:.0f}s] {speaker}: {text}")
+                            if len(transcript["segments"]) > 20:
+                                result_lines.append(f"... and {len(transcript['segments']) - 20} more segments")
+                    result_lines.append("-" * 50)
+                elif fd.get("transcriptUrl"):
+                    result_lines.append("")
+                    result_lines.append(f"📄 Transcript URL: {fd['transcriptUrl']}")
+                
+                result_lines.append("")
+                result_lines.append("=" * 50)
+                
+                return "\n".join(result_lines)
+            else:
+                return f"❌ Failed to get file info: {data}"
+        
+        # DISCOVERY - SEARCH ALL RECORDINGS
+        elif name == "search_recordings":
+            query = args["query"].lower()
+            max_files = args.get("maxFiles", 50)
+            include_transcripts = args.get("includeTranscripts", True)
+            start_folder = args.get("folderId", "__default")
+            
+            result_lines = [f"🔍 Searching recordings for: \"{query}\""]
+            result_lines.append(f"📊 Indexing up to {max_files} files...")
+            result_lines.append("")
+            
+            # Collect all files from root folder
+            all_files = []
+            
+            # Get files from starting folder
+            try:
+                r = await client.get(
+                    f"{BASE_URL}/v1/folders/{start_folder}/files",
+                    params={"limit": min(max_files, 100)}
+                )
+                r.raise_for_status()
+                data = r.json()
+                
+                if data.get("success") and data.get("data"):
+                    all_files.extend(data["data"][:max_files])
+            except Exception as e:
+                result_lines.append(f"⚠️  Could not fetch from folder: {e}")
+            
+            # Search through files
+            matches = []
+            for file_info in all_files:
+                file_id = file_info.get("id", "")
+                name = file_info.get("name", "").lower()
+                
+                # Check name match
+                name_match = query in name
+                
+                # Check transcript if enabled
+                transcript_match = False
+                transcript_snippet = ""
+                
+                if include_transcripts and name_match == False:
+                    try:
+                        file_r = await client.get(
+                            f"{BASE_URL}/v2/files/{file_id}"
+                        )
+                        if file_r.status_code == 200:
+                            file_data = file_r.json()
+                            if file_data.get("success") and file_data.get("data"):
+                                fd = file_data["data"]
+                                if fd.get("transcript"):
+                                    transcript = fd["transcript"]
+                                    if isinstance(transcript, dict) and transcript.get("text"):
+                                        transcript_text = transcript["text"].lower()
+                                        if query in transcript_text:
+                                            transcript_match = True
+                                            # Get snippet around match
+                                            idx = transcript_text.find(query)
+                                            start_idx = max(0, idx - 50)
+                                            end_idx = min(len(transcript["text"]), idx + 100)
+                                            transcript_snippet = "..." + transcript["text"][start_idx:end_idx] + "..."
+                                    elif isinstance(transcript, str) and query in transcript.lower():
+                                        transcript_match = True
+                                        idx = transcript.lower().find(query)
+                                        start_idx = max(0, idx - 50)
+                                        end_idx = min(len(transcript), idx + 100)
+                                        transcript_snippet = "..." + transcript[start_idx:end_idx] + "..."
+                    except:
+                        pass
+                
+                # Add to matches if any match found
+                if name_match or transcript_match:
+                    match_info = {
+                        "id": file_id,
+                        "name": file_info.get("name", "Untitled"),
+                        "duration": file_info.get("duration", 0),
+                        "status": file_info.get("status", "unknown"),
+                        "match_type": "name" if name_match else "transcript",
+                        "snippet": transcript_snippet if transcript_match else ""
+                    }
+                    matches.append(match_info)
+            
+            # Display results
+            if matches:
+                result_lines.append(f"✅ Found {len(matches)} matching recordings:")
+                result_lines.append("")
+                
+                for i, match in enumerate(matches[:10], 1):
+                    result_lines.append(f"{i}. 📄 {match['name']}")
+                    result_lines.append(f"   ID: {match['id']}")
+                    result_lines.append(f"   ⏱️  {match['duration']}s | 📊 {match['status']}")
+                    result_lines.append(f"   🔗 Match: {match['match_type']}")
+                    if match['snippet']:
+                        result_lines.append(f"   💬 \"{match['snippet'][:80]}...\"")
+                    result_lines.append("")
+                
+                if len(matches) > 10:
+                    result_lines.append(f"... and {len(matches) - 10} more matches")
+            else:
+                result_lines.append("❌ No matching recordings found")
+                result_lines.append("")
+                result_lines.append("💡 Try a different search term or increase maxFiles")
+            
+            return "\n".join(result_lines)
+        
+        # DISCOVERY - LIST ALL FOLDERS (Recursive)
+        elif name == "list_all_folders":
+            start_folder = args.get("folderId", "__default")
+            max_depth = args.get("maxDepth", 3)
+            include_counts = args.get("includeFileCounts", True)
+            
+            result_lines = [f"📂 Folder Hierarchy (starting from: {start_folder})"]
+            result_lines.append(f"📊 Max depth: {max_depth}")
+            result_lines.append("=" * 60)
+            
+            async def get_subfolders(folder_id, depth=0, prefix=""):
+                """Recursively get folders"""
+                folders_data = []
+                
+                if depth >= max_depth:
+                    return folders_data
+                
+                try:
+                    r = await client.get(
+                        f"{BASE_URL}/v1/folders/{folder_id}/folders",
+                        params={"limit": 50}
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+                    
+                    if data.get("success") and data.get("data"):
+                        for folder in data["data"]:
+                            folder_id_out = folder.get("id", "")
+                            name = folder.get("name", "Untitled Folder")
+                            file_count = folder.get("fileCount", 0)
+                            
+                            entry = {
+                                "name": name,
+                                "id": folder_id_out,
+                                "depth": depth,
+                                "file_count": file_count if include_counts else None
+                            }
+                            folders_data.append(entry)
+                            
+                            # Get subfolders recursively
+                            subfolders = await get_subfolders(folder_id_out, depth + 1, prefix + "  ")
+                            folders_data.extend(subfolders)
+                except Exception as e:
+                    logger.error(f"Error fetching subfolders for {folder_id}: {e}")
+                
+                return folders_data
+            
+            # Get initial subfolders
+            all_folders = await get_subfolders(start_folder)
+            
+            # Also get files in current folder
+            try:
+                r = await client.get(
+                    f"{BASE_URL}/v1/folders/{start_folder}/files",
+                    params={"limit": 5}
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get("success") and data.get("data"):
+                        result_lines.append("")
+                        result_lines.append(f"📄 Files in root: {len(data['data'])} files")
+                        for f in data['data'][:5]:
+                            result_lines.append(f"   - {f.get('name', 'Untitled')} ({f.get('duration', 0)}s)")
+            except:
+                pass
+            
+            # Display folder hierarchy
+            if all_folders:
+                result_lines.append("")
+                result_lines.append("📁 Folder Tree:")
+                for folder in all_folders:
+                    indent = "  " * folder["depth"]
+                    file_info = f" [{folder['file_count']} files]" if folder["file_count"] else ""
+                    result_lines.append(f"{indent}📁 {folder['name']}{file_info}")
+                    result_lines.append(f"{indent}   ID: {folder['id']}")
+            else:
+                result_lines.append("")
+                result_lines.append("⚠️  No sub-folders found")
+            
+            result_lines.append("=" * 60)
+            result_lines.append(f"✅ Total folders found: {len(all_folders)}")
+            
+            return "\n".join(result_lines)
+        
+        # DISCOVERY - INDEX ALL RECORDINGS
+        elif name == "index_all_recordings":
+            max_files = args.get("maxFiles", 100)
+            include_stats = args.get("includeStats", True)
+            
+            result_lines = [f"📋 Recording Index"]
+            result_lines.append(f"📊 Indexing up to {max_files} recordings...")
+            result_lines.append("=" * 60)
+            
+            # Collect all files
+            all_files = []
+            
+            try:
+                # Get from root
+                r = await client.get(
+                    f"{BASE_URL}/v1/folders/__default/files",
+                    params={"limit": min(max_files, 100)}
+                )
+                r.raise_for_status()
+                data = r.json()
+                
+                if data.get("success") and data.get("data"):
+                    all_files.extend(data["data"][:max_files])
+            except Exception as e:
+                result_lines.append(f"⚠️  Error fetching root: {e}")
+            
+            # Calculate stats
+            total_duration = sum(f.get("duration", 0) for f in all_files)
+            processed = sum(1 for f in all_files if f.get("status") == "processed")
+            pending = sum(1 for f in all_files if f.get("status") == "pending")
+            failed = sum(1 for f in all_files if f.get("status") == "failed")
+            
+            result_lines.append("")
+            result_lines.append(f"📊 Total Files: {len(all_files)}")
+            
+            if include_stats:
+                result_lines.append("")
+                result_lines.append(f"⏱️  Total Duration: {total_duration} seconds ({total_duration/60:.1f} min)")
+                result_lines.append(f"✅ Processed: {processed}")
+                result_lines.append(f"⏳ Pending: {pending}")
+                result_lines.append(f"❌ Failed: {failed}")
+            
+            result_lines.append("")
+            result_lines.append("📄 Files:")
+            for i, file_info in enumerate(all_files[:20], 1):
+                name = file_info.get("name", "Untitled")
+                fid = file_info.get("id", "")
+                duration = file_info.get("duration", 0)
+                status = file_info.get("status", "unknown")
+                
+                status_icon = "✅" if status == "processed" else "⏳" if status == "pending" else "❌"
+                result_lines.append(f"{i}. {status_icon} {name}")
+                result_lines.append(f"   ID: {fid} | Duration: {duration}s")
+            
+            if len(all_files) > 20:
+                result_lines.append("")
+                result_lines.append(f"... and {len(all_files) - 20} more files")
+            
+            result_lines.append("=" * 60)
+            result_lines.append(f"💡 Use file IDs with ask_recording or get_transcript for details")
+            
+            return "\n".join(result_lines)
+        
         return f"❌ Unknown tool: {name}"
     
     except httpx.HTTPStatusError as e:
@@ -701,7 +1338,10 @@ async def root():
             "tags": ["add_file_tag", "remove_file_tag", "add_team_tag", "remove_team_tag", "add_account_tag"],
             "webhooks": ["register_team_webhook", "unregister_team_webhook", "register_user_webhook", "unregister_user_webhook"],
             "account": ["update_profile"],
-            "upload": ["get_upload_url", "init_multipart_upload"]
+            "upload": ["get_upload_url", "init_multipart_upload"],
+            "folders": ["list_folder_files", "get_folder_transcripts", "list_folders"],
+            "files": ["get_transcript", "get_file_info"],
+            "discovery": ["search_recordings", "list_all_folders", "index_all_recordings"]
         }
     }
 
