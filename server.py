@@ -7,9 +7,13 @@ import os
 import json
 import logging
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+# Load environment variables from .env file
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("screenapp-mcp")
@@ -20,7 +24,7 @@ TEAM_ID = os.getenv("SCREENAPP_TEAM_ID")
 BASE_URL = "https://api.screenapp.io"
 
 if not API_KEY or not TEAM_ID:
-    raise ValueError("SCREENAPP_API_TOKEN and SCREENAPP_TEAM_ID required")
+    raise ValueError("SCREENAPP_API_TOKEN and SCREENAPP_TEAM_ID required. Please create a .env file with these variables.")
 
 # HTTP Client
 client = httpx.AsyncClient(
@@ -220,6 +224,89 @@ TOOLS = [
             },
             "required": ["contentType"]
         }
+    },
+    {
+        "name": "get_multipart_upload_url",
+        "description": "Get pre-signed URL for uploading a part of a large file",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "uploadId": {"type": "string", "description": "Upload ID from init_multipart_upload"},
+                "partNumber": {"type": "integer", "description": "Part number (1-based)"}
+            },
+            "required": ["uploadId", "partNumber"]
+        }
+    },
+    {
+        "name": "finalize_multipart_upload",
+        "description": "Complete multipart upload after all parts are uploaded",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "uploadId": {"type": "string", "description": "Upload ID from init_multipart_upload"},
+                "fileId": {"type": "string", "description": "File ID from init_multipart_upload"},
+                "parts": {
+                    "type": "array",
+                    "description": "Array of part info [{partNumber, etag}]",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "partNumber": {"type": "integer"},
+                            "etag": {"type": "string"}
+                        }
+                    }
+                }
+            },
+            "required": ["uploadId", "fileId", "parts"]
+        }
+    },
+    {
+        "name": "fallback_upload",
+        "description": "Fallback upload method for files that fail multipart upload",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fileId": {"type": "string", "description": "File ID from init_multipart_upload"},
+                "contentType": {"type": "string", "description": "MIME type of the file"}
+            },
+            "required": ["fileId", "contentType"]
+        }
+    },
+    {
+        "name": "finalize_upload",
+        "description": "Finalize a simple upload after file is uploaded to pre-signed URL",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fileId": {"type": "string", "description": "File ID from get_upload_url"}
+            },
+            "required": ["fileId"]
+        }
+    },
+    {
+        "name": "get_zapier_sample",
+        "description": "Get sample data for Zapier integration setup",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "teamId": {"type": "string", "description": "Team ID (defaults to your team)"}
+            }
+        }
+    },
+    
+    # File Management - Get Recording/Transcript
+    {
+        "name": "get_transcript",
+        "description": "Get transcript and media URLs for a recording/file. Returns the Google Cloud Storage URL for video/audio, transcript data with speaker labels and timestamps.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fileId": {"type": "string", "description": "ID of the file/recording to get transcript for"},
+                "includeVideoUrl": {"type": "boolean", "default": False, "description": "Include video download URL"},
+                "includeAudioUrl": {"type": "boolean", "default": False, "description": "Include audio download URL"}
+            },
+            "required": ["fileId"]
+        }
     }
 ]
 
@@ -293,7 +380,8 @@ async def execute_tool(name: str, args: dict) -> str:
             return f"✅ Tag added to file:\n🏷️  {args['key']} = {args['value']}"
         
         elif name == "remove_file_tag":
-            r = await client.delete(
+            r = await client.request(
+                "DELETE",
                 f"{BASE_URL}/v2/files/{args['fileId']}/tag",
                 json={"key": args["key"]}
             )
@@ -312,7 +400,8 @@ async def execute_tool(name: str, args: dict) -> str:
         
         elif name == "remove_team_tag":
             team_id = args.get("teamId", TEAM_ID)
-            r = await client.delete(
+            r = await client.request(
+                "DELETE",
                 f"{BASE_URL}/v2/team/{team_id}/tag",
                 json={"key": args["key"]}
             )
@@ -428,6 +517,157 @@ async def execute_tool(name: str, args: dict) -> str:
                        f"4. Finalize the upload"
             else:
                 return f"❌ Multipart init failed: {data}"
+        
+        elif name == "get_multipart_upload_url":
+            r = await client.put(
+                f"{BASE_URL}/v2/files/upload/multipart/url/{args['uploadId']}/{args['partNumber']}",
+                json={}
+            )
+            r.raise_for_status()
+            data = r.json()
+            
+            if data.get("success") and data.get("data"):
+                part = data["data"]
+                return f"📤 Part Upload URL:\n\n" \
+                       f"Part Number: {args['partNumber']}\n" \
+                       f"Upload URL: {part.get('uploadUrl')}\n\n" \
+                       f"💡 Use PUT to upload this part to the URL"
+            else:
+                return f"❌ Failed to get upload URL: {data}"
+        
+        elif name == "finalize_multipart_upload":
+            r = await client.put(
+                f"{BASE_URL}/v2/files/upload/multipart/finalize/{args['uploadId']}",
+                json={
+                    "fileId": args["fileId"],
+                    "parts": args["parts"]
+                }
+            )
+            r.raise_for_status()
+            return f"✅ Multipart upload finalized:\n\nFile ID: {args['fileId']}\nParts: {len(args['parts'])}"
+        
+        elif name == "fallback_upload":
+            r = await client.put(
+                f"{BASE_URL}/v2/files/upload/multipart/fallback/{args['fileId']}",
+                json={"contentType": args["contentType"]}
+            )
+            r.raise_for_status()
+            data = r.json()
+            
+            if data.get("success"):
+                return f"📤 Fallback upload URL generated for file: {args['fileId']}\n\nUse PUT to upload directly to the file."
+            else:
+                return f"❌ Fallback upload failed: {data}"
+        
+        elif name == "finalize_upload":
+            r = await client.post(
+                f"{BASE_URL}/v2/files/upload/{TEAM_ID}/finalize",
+                json={"fileId": args["fileId"]}
+            )
+            r.raise_for_status()
+            return f"✅ Upload finalized for file: {args['fileId']}\n\nFile will be processed automatically."
+        
+        elif name == "get_zapier_sample":
+            team_id = args.get("teamId", TEAM_ID)
+            r = await client.get(
+                f"{BASE_URL}/v2/team/{team_id}/integrations/zapier/sample/list"
+            )
+            r.raise_for_status()
+            data = r.json()
+            
+            if data.get("success") and data.get("data"):
+                samples = data["data"]
+                result_lines = [f"📊 Zapier Sample Data ({len(samples)} items)"]
+                for item in samples[:5]:
+                    result_lines.append(f"\n- {json.dumps(item, indent=2)}")
+                if len(samples) > 5:
+                    result_lines.append(f"\n... and {len(samples) - 5} more items")
+                return "\n".join(result_lines)
+            else:
+                return f"❌ Failed to get Zapier sample: {data}"
+        
+        # FILE MANAGEMENT - GET TRANSCRIPT
+        elif name == "get_transcript":
+            file_id = args["fileId"]
+            include_video = args.get("includeVideoUrl", False)
+            include_audio = args.get("includeAudioUrl", False)
+            
+            # Build query params
+            params = {}
+            if include_video:
+                params["video"] = "true"
+            if include_audio:
+                params["audio"] = "true"
+            
+            r = await client.get(
+                f"{BASE_URL}/v2/files/{file_id}",
+                params=params
+            )
+            r.raise_for_status()
+            data = r.json()
+            
+            if data.get("success") and data.get("data"):
+                file_data = data["data"]
+                
+                # Build response
+                result_lines = [f"📄 Recording Details (File ID: {file_id})"]
+                result_lines.append("")
+                
+                # Basic info
+                if "name" in file_data:
+                    result_lines.append(f"📝 Name: {file_data['name']}")
+                if "duration" in file_data:
+                    result_lines.append(f"⏱️  Duration: {file_data['duration']} seconds")
+                if "status" in file_data:
+                    result_lines.append(f"📊 Status: {file_data['status']}")
+                if "createdAt" in file_data:
+                    result_lines.append(f"🗓️  Created: {file_data['createdAt']}")
+                
+                # Media URLs
+                if "videoUrl" in file_data and file_data["videoUrl"]:
+                    result_lines.append("")
+                    result_lines.append(f"🎬 Video URL (GCS):")
+                    result_lines.append(f"   {file_data['videoUrl']}")
+                
+                if "audioUrl" in file_data and file_data["audioUrl"]:
+                    result_lines.append("")
+                    result_lines.append(f"🎵 Audio URL (GCS):")
+                    result_lines.append(f"   {file_data['audioUrl']}")
+                
+                # Transcript data
+                if "transcript" in file_data and file_data["transcript"]:
+                    transcript = file_data["transcript"]
+                    result_lines.append("")
+                    result_lines.append("📜 Transcript:")
+                    result_lines.append("-" * 40)
+                    
+                    # Check if transcript is a string or object
+                    if isinstance(transcript, str):
+                        result_lines.append(transcript)
+                    elif isinstance(transcript, dict):
+                        # Handle structured transcript
+                        if "text" in transcript:
+                            result_lines.append(transcript["text"])
+                        if "segments" in transcript:
+                            result_lines.append("")
+                            result_lines.append("📍 Segments:")
+                            for seg in transcript["segments"][:10]:  # Limit to first 10
+                                start = seg.get("start", 0)
+                                end = seg.get("end", 0)
+                                text = seg.get("text", "")
+                                speaker = seg.get("speaker", "Unknown")
+                                result_lines.append(f"  [{start:.1f}s - {end:.1f}s] {speaker}: {text}")
+                            if len(transcript["segments"]) > 10:
+                                result_lines.append(f"  ... and {len(transcript['segments']) - 10} more segments")
+                    result_lines.append("-" * 40)
+                elif "transcriptUrl" in file_data and file_data["transcriptUrl"]:
+                    result_lines.append("")
+                    result_lines.append("📄 Transcript URL:")
+                    result_lines.append(f"   {file_data['transcriptUrl']}")
+                
+                return "\n".join(result_lines)
+            else:
+                return f"❌ Failed to get file info: {data}"
         
         return f"❌ Unknown tool: {name}"
     
