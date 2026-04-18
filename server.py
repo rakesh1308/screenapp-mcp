@@ -309,48 +309,6 @@ TOOLS = [
         }
     },
     
-    # Folder Management - List Files
-    {
-        "name": "list_folder_files",
-        "description": "List all files in a folder. Returns file IDs, names, durations, and status for all recordings in the specified folder.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "folderId": {"type": "string", "default": "__default", "description": "Folder ID (use '__default' for root folder)"},
-                "cursor": {"type": "string", "description": "Pagination cursor for fetching next page of results"},
-                "limit": {"type": "integer", "default": 50, "description": "Maximum number of files to return (1-100)"}
-            }
-        }
-    },
-    
-    # Folder Management - Get All Transcripts
-    {
-        "name": "get_folder_transcripts",
-        "description": "Get transcripts for ALL files in a folder. Returns structured transcript data with speaker labels and timestamps for each file. Use this to analyze all recordings in a folder.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "folderId": {"type": "string", "default": "__default", "description": "Folder ID (use '__default' for root folder)"},
-                "includeVideoUrl": {"type": "boolean", "default": False, "description": "Include video download URL for each file"},
-                "includeAudioUrl": {"type": "boolean", "default": False, "description": "Include audio download URL for each file"},
-                "maxFiles": {"type": "integer", "default": 20, "description": "Maximum number of files to process (to avoid timeouts)"}
-            }
-        }
-    },
-    
-    # Folder Management - List Sub-folders
-    {
-        "name": "list_folders",
-        "description": "List all sub-folders within a folder. Use to explore the folder hierarchy.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "folderId": {"type": "string", "default": "__default", "description": "Parent folder ID (use '__default' for root)"},
-                "cursor": {"type": "string", "description": "Pagination cursor for fetching next page"}
-            }
-        }
-    },
-    
     # File Management - Get File Info
     {
         "name": "get_file_info",
@@ -363,49 +321,6 @@ TOOLS = [
                 "includeAudioUrl": {"type": "boolean", "default": False, "description": "Include audio download URL"}
             },
             "required": ["fileId"]
-        }
-    },
-    
-    # Discovery - Search All Recordings
-    {
-        "name": "search_recordings",
-        "description": "Search across all recordings in your entire library. Indexes files from all folders (recursively) and searches by name, transcript content, or tags. Use this to find specific recordings without knowing folder/file IDs.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query (matches file name, transcript text, or tags)"},
-                "maxFiles": {"type": "integer", "default": 50, "description": "Maximum files to index and search (higher = slower but more thorough)"},
-                "includeTranscripts": {"type": "boolean", "default": True, "description": "Include transcript content in search"},
-                "folderId": {"type": "string", "description": "Optional: Start search from specific folder (default: all folders)"}
-            },
-            "required": ["query"]
-        }
-    },
-    
-    # Discovery - List All Folders (Recursive)
-    {
-        "name": "list_all_folders",
-        "description": "List ALL folders in your entire library recursively. Returns the complete folder hierarchy with file counts. Useful for exploring what content is available.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "folderId": {"type": "string", "default": "__default", "description": "Starting folder (default: root)"},
-                "maxDepth": {"type": "integer", "default": 3, "description": "Maximum folder depth to traverse"},
-                "includeFileCounts": {"type": "boolean", "default": True, "description": "Include file counts per folder"}
-            }
-        }
-    },
-    
-    # Discovery - Index All Recordings
-    {
-        "name": "index_all_recordings",
-        "description": "Build a searchable index of all recordings across all folders. Returns summary of all files with names, IDs, and brief metadata. Use for discovery before detailed analysis.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "maxFiles": {"type": "integer", "default": 100, "description": "Maximum files to index"},
-                "includeStats": {"type": "boolean", "default": True, "description": "Include duration and status stats"}
-            }
         }
     }
 ]
@@ -1332,16 +1247,15 @@ async def root():
         "service": "screenapp-mcp-official",
         "version": "1.0.0",
         "tools": len(TOOLS),
-        "note": "Uses ONLY documented API endpoints",
+        "note": "Uses ONLY documented API endpoints from https://screenapp.io/help/api-documentation",
         "categories": {
             "ai_analysis": ["ask_recording"],
             "tags": ["add_file_tag", "remove_file_tag", "add_team_tag", "remove_team_tag", "add_account_tag"],
             "webhooks": ["register_team_webhook", "unregister_team_webhook", "register_user_webhook", "unregister_user_webhook"],
             "account": ["update_profile"],
-            "upload": ["get_upload_url", "init_multipart_upload"],
-            "folders": ["list_folder_files", "get_folder_transcripts", "list_folders"],
+            "upload": ["get_upload_url", "init_multipart_upload", "get_multipart_upload_url", "finalize_multipart_upload", "fallback_upload", "finalize_upload"],
             "files": ["get_transcript", "get_file_info"],
-            "discovery": ["search_recordings", "list_all_folders", "index_all_recordings"]
+            "integrations": ["get_zapier_sample"]
         }
     }
 
