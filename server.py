@@ -161,6 +161,8 @@ async def execute_tool(name: str, args: dict) -> str:
         # GET FILE TRANSCRIPT
         elif name == "get_file_transcript":
             file_id = args["fileId"]
+            start = args.get("start", 0)
+            end = args.get("end", None)
             
             r = await client.get(f"{BASE_URL}/v2/files/{file_id}")
             r.raise_for_status()
@@ -170,25 +172,48 @@ async def execute_tool(name: str, args: dict) -> str:
                 fd = data["data"]
                 name = fd.get("name", "Untitled")
                 duration = fd.get("duration", 0)
+                transcript = fd.get("transcript")
                 
                 result = f"📄 {name}\n   Duration: {duration}s | ID: {file_id}\n"
                 
-                if fd.get("transcript"):
-                    t = fd["transcript"]
+                if transcript:
+                    t = transcript
                     if isinstance(t, str):
                         result += f"\n📜 Transcript:\n{t}"
                     elif isinstance(t, dict):
-                        if "text" in t:
-                            result += f"\n📜 Transcript:\n{t['text']}"
-                        if "segments" in t:
-                            result += "\n\n📍 Segments:"
-                            for seg in t["segments"]:
-                                start = seg.get("start", 0)
+                        all_segments = t.get("segments", [])
+                        # Filter by time range if specified
+                        if end is not None:
+                            segments = [s for s in all_segments if start <= s.get("start", 0) <= end]
+                            result += f"\n📜 Transcript (Range: {start}s - {end}s)\n"
+                        else:
+                            segments = all_segments
+                            result += f"\n📜 Transcript (Full: {start}s - end)\n"
+                        
+                        if "text" in t and start == 0:
+                            result += t["text"] + "\n"
+                        
+                        if segments:
+                            result += "\n📍 Segments:"
+                            for seg in segments:
+                                seg_start = seg.get("start", 0)
                                 text = seg.get("text", "")
                                 speaker = seg.get("speaker", "Unknown")
-                                result += f"\n[{start:.0f}s] {speaker}: {text}"
+                                result += f"\n[{seg_start:.0f}s] {speaker}: {text}"
+                            
+                            # Check if there's more content
+                            if all_segments:
+                                last_seg = all_segments[-1].get("start", 0)
+                                if last_seg > (end or all_segments[-1].get("start", 0)):
+                                    result += f"\n\n💡 More content available. Use: get_transcript_chunks(fileId=\"{file_id}\", start={end or segments[-1].get('start', 0)}, end={last_seg + 300})"
+                        elif all_segments:
+                            # No segments in range, show what's available
+                            first = all_segments[0].get("start", 0)
+                            last = all_segments[-1].get("start", 0)
+                            result += f"\n⚠️ No segments in range {start}s - {end}s"
+                            result += f"\n   Available: {first}s - {last}s"
                 elif fd.get("transcriptUrl"):
-                    result += f"\n📄 URL: {fd['transcriptUrl']}"
+                    result += f"\n📄 Transcript URL: {fd['transcriptUrl']}"
                 else:
                     result += "\n⚠️ No transcript"
                 
