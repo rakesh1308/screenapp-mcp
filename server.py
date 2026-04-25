@@ -51,13 +51,29 @@ TOOLS = [
     },
     {
         "name": "get_file_transcript",
-        "description": "Get raw transcript for a single recording/file. Returns full transcript text and all segment timestamps.",
+        "description": "Get raw transcript for a single recording/file. Optionally specify time range (start/end in seconds) to fetch specific portions.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "fileId": {"type": "string", "description": "ID of the file/recording"}
+                "fileId": {"type": "string", "description": "ID of the file/recording"},
+                "start": {"type": "number", "description": "Start time in seconds (default: 0)"},
+                "end": {"type": "number", "description": "End time in seconds (default: full duration)"}
             },
             "required": ["fileId"]
+        }
+    },
+    {
+        "name": "get_transcript_chunks",
+        "description": "Get transcript in time chunks. Useful for large recordings. Returns segments within the specified time range.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fileId": {"type": "string", "description": "ID of the file/recording"},
+                "start": {"type": "number", "description": "Start time in seconds"},
+                "end": {"type": "number", "description": "End time in seconds"},
+                "chunk_size": {"type": "number", "default": 300, "description": "Chunk size in seconds"}
+            },
+            "required": ["fileId", "start", "end"]
         }
     },
     {
@@ -175,6 +191,72 @@ async def execute_tool(name: str, args: dict) -> str:
                     result += f"\n📄 URL: {fd['transcriptUrl']}"
                 else:
                     result += "\n⚠️ No transcript"
+                
+                return result
+            return f"❌ Failed: {data}"
+        
+        # GET TRANSCRIPT CHUNKS (for large recordings)
+        elif name == "get_transcript_chunks":
+            file_id = args["fileId"]
+            start = args.get("start", 0)
+            end = args.get("end", 300)
+            chunk_size = args.get("chunk_size", 300)
+            
+            r = await client.get(f"{BASE_URL}/v2/files/{file_id}")
+            r.raise_for_status()
+            data = r.json()
+            
+            if data.get("success") and data.get("data"):
+                fd = data["data"]
+                name = fd.get("name", "Untitled")
+                duration = fd.get("duration", 0)
+                
+                result = f"📄 {name} | Duration: {duration}s | Range: {start}s - {end}s\n"
+                result += f"   Chunk size: {chunk_size}s | ID: {file_id}\n\n"
+                
+                if fd.get("transcript"):
+                    t = fd["transcript"]
+                    segments = []
+                    
+                    if isinstance(t, str):
+                        # String transcript - just return it
+                        result += f"📜 Transcript (0s - end):\n{t}"
+                    elif isinstance(t, dict) and "segments" in t:
+                        segments = t["segments"]
+                        
+                        # Filter segments within time range
+                        filtered = [s for s in segments if start <= s.get("start", 0) <= end]
+                        
+                        if filtered:
+                            # Group by chunks
+                            num_chunks = max(1, int((end - start) / chunk_size))
+                            for chunk_idx in range(num_chunks):
+                                chunk_start = start + (chunk_idx * chunk_size)
+                                chunk_end = min(chunk_start + chunk_size, end)
+                                
+                                result += f"\n{'='*50}\n"
+                                result += f"📍 CHUNK {chunk_idx + 1}/{num_chunks} [{chunk_start}s - {chunk_end}s]\n"
+                                result += f"{'='*50}\n"
+                                
+                                chunk_segs = [s for s in filtered if chunk_start <= s.get("start", 0) < chunk_end]
+                                
+                                for seg in chunk_segs:
+                                    s_start = seg.get("start", 0)
+                                    text = seg.get("text", "")
+                                    speaker = seg.get("speaker", "Unknown")
+                                    result += f"[{s_start:.0f}s] {speaker}: {text}\n"
+                                
+                                if not chunk_segs:
+                                    result += "   (no segments in this range)\n"
+                        else:
+                            result += f"⚠️ No segments found between {start}s and {end}s\n"
+                            result += f"   Total segments in file: {len(segments)}\n"
+                            if segments:
+                                result += f"   Available range: {segments[0].get('start', 0)}s - {segments[-1].get('start', 0)}s\n"
+                    else:
+                        result += "⚠️ Unexpected transcript format\n"
+                else:
+                    result += "⚠️ No transcript available\n"
                 
                 return result
             return f"❌ Failed: {data}"
