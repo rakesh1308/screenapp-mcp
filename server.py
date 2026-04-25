@@ -163,6 +163,7 @@ async def execute_tool(name: str, args: dict) -> str:
             file_id = args["fileId"]
             start = args.get("start", 0)
             end = args.get("end", None)
+            max_chars = args.get("max_chars", 8000)  # Limit output to prevent overflow
             
             r = await client.get(f"{BASE_URL}/v2/files/{file_id}")
             r.raise_for_status()
@@ -179,39 +180,51 @@ async def execute_tool(name: str, args: dict) -> str:
                 if transcript:
                     t = transcript
                     if isinstance(t, str):
-                        result += f"\n📜 Transcript:\n{t}"
+                        result += f"\n📜 Transcript:\n{t[:max_chars]}"
                     elif isinstance(t, dict):
                         all_segments = t.get("segments", [])
-                        # Filter by time range if specified
+                        full_text = t.get("text", "")
+                        
                         if end is not None:
                             segments = [s for s in all_segments if start <= s.get("start", 0) <= end]
                             result += f"\n📜 Transcript (Range: {start}s - {end}s)\n"
                         else:
                             segments = all_segments
-                            result += f"\n📜 Transcript (Full: {start}s - end)\n"
+                            result += f"\n📜 Transcript\n"
                         
-                        if "text" in t and start == 0:
-                            result += t["text"] + "\n"
-                        
-                        if segments:
-                            result += "\n📍 Segments:"
+                        # Add text if available (up to limit)
+                        if full_text and start == 0:
+                            if len(full_text) > max_chars:
+                                result += full_text[:max_chars]
+                            else:
+                                result += full_text
+                        else:
+                            # Add segments
                             for seg in segments:
                                 seg_start = seg.get("start", 0)
                                 text = seg.get("text", "")
                                 speaker = seg.get("speaker", "Unknown")
-                                result += f"\n[{seg_start:.0f}s] {speaker}: {text}"
+                                line = f"\n[{seg_start:.0f}s] {speaker}: {text}"
+                                if len(result) + len(line) < max_chars:
+                                    result += line
+                                else:
+                                    break
+                        
+                        # Check if content was truncated
+                        total_chars = len(full_text) if full_text else sum(len(s.get("text","")) for s in segments)
+                        
+                        if all_segments:
+                            first_start = all_segments[0].get("start", 0)
+                            last_end = all_segments[-1].get("start", 0) + 10  # Approximate
                             
-                            # Check if there's more content
-                            if all_segments:
-                                last_seg = all_segments[-1].get("start", 0)
-                                if last_seg > (end or all_segments[-1].get("start", 0)):
-                                    result += f"\n\n💡 More content available. Use: get_transcript_chunks(fileId=\"{file_id}\", start={end or segments[-1].get('start', 0)}, end={last_seg + 300})"
-                        elif all_segments:
-                            # No segments in range, show what's available
-                            first = all_segments[0].get("start", 0)
-                            last = all_segments[-1].get("start", 0)
-                            result += f"\n⚠️ No segments in range {start}s - {end}s"
-                            result += f"\n   Available: {first}s - {last}s"
+                            if total_chars > max_chars or (all_segments and last_end > (end or last_end)):
+                                result += f"\n\n{'='*50}\n"
+                                result += f"⚠️ OUTPUT TRUNCATED (showing ~{max_chars} chars)\n"
+                                result += f"📍 Available range: {first_start}s - {last_end}s\n"
+                                result += f"💡 To get more: use get_transcript_chunks(fileId=\"{file_id}\", start=0, end=300)\n"
+                                result += f"   Then: get_transcript_chunks(fileId=\"{file_id}\", start=300, end=600)\n"
+                                result += f"   And so on...\n"
+                                result += f"{'='*50}"
                 elif fd.get("transcriptUrl"):
                     result += f"\n📄 Transcript URL: {fd['transcriptUrl']}"
                 else:
