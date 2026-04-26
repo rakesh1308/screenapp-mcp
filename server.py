@@ -398,39 +398,61 @@ async def execute_tool(name: str, args: dict) -> str:
             if include_video: params["video"] = "true"
             if include_audio: params["audio"] = "true"
             
-            r = await client.get(f"{BASE_URL}/v2/files/{file_id}", params=params)
+            r = await client.get(f"{BASE_URL}/v2/files/{file_id}")
             r.raise_for_status()
             data = r.json()
             
             if data.get("success") and data.get("data"):
                 fd = data["data"]
-                result = f"📄 File: {fd.get('name', 'Unknown')}\n"
-                result += f"   ID: {file_id} | Duration: {fd.get('duration', 0)}s | Status: {fd.get('status', 'unknown')}\n"
+                name = fd.get("name", "Unknown")
+                duration = fd.get("duration", 0)
+                status = fd.get("status", "unknown")
+                
+                result = f"📄 {name}\n"
+                result += f"   ID: {file_id}\n"
+                result += f"   Duration: {duration}s ({duration/60:.1f} min)\n"
+                result += f"   Status: {status}\n"
                 
                 if "createdAt" in fd:
                     result += f"   Created: {fd['createdAt']}\n"
                 
-                if include_video and fd.get("videoUrl"):
-                    result += f"\n🎬 Video: {fd['videoUrl']}\n"
-                if include_audio and fd.get("audioUrl"):
-                    result += f"\n🎵 Audio: {fd['audioUrl']}\n"
-                
-                if fd.get("transcript"):
-                    t = fd["transcript"]
-                    result += "\n📜 Transcript:\n" + ("-" * 40) + "\n"
-                    if isinstance(t, str):
-                        result += t
-                    elif isinstance(t, dict):
-                        if "text" in t: result += t["text"]
-                        if "segments" in t:
-                            result += "\n📍 Segments:\n"
-                            for seg in t["segments"][:20]:
-                                result += f"  [{seg.get('start',0):.0f}s] {seg.get('speaker','Unknown')}: {seg.get('text','')}\n"
-                            if len(t["segments"]) > 20:
-                                result += f"  ... and {len(t['segments'])-20} more\n"
-                    result += "-" * 40 + "\n"
+                # Transcript metadata
+                transcript = fd.get("transcript")
+                if transcript:
+                    result += f"\n📜 Transcript: Available\n"
+                    if isinstance(transcript, dict):
+                        segments = transcript.get("segments", [])
+                        text = transcript.get("text", "")
+                        
+                        result += f"   ├─ Text length: {len(text)} chars\n" if text else ""
+                        result += f"   ├─ Segments: {len(segments)}\n"
+                        
+                        if segments:
+                            first_start = segments[0].get("start", 0)
+                            last_end = segments[-1].get("start", 0) + 10
+                            result += f"   ├─ Range: {first_start:.0f}s - {last_end:.0f}s\n"
+                            
+                            # Calculate chunks needed
+                            chunk_size = 300
+                            num_chunks = int((last_end / chunk_size)) + (1 if last_end % chunk_size > 0 else 0)
+                            result += f"   ├─ Chunks (300s): {num_chunks} chunks\n"
+                            result += f"   └─ Tip: Use get_all_transcripts(fileId=\"{file_id}\") for full transcript\n"
+                        elif text:
+                            result += f"   └─ Text only (no segment timestamps)\n"
+                    elif isinstance(transcript, str):
+                        result += f"   ├─ Type: Plain text\n"
+                        result += f"   ├─ Length: {len(transcript)} chars\n"
+                        result += f"   └─ Content preview: {transcript[:100]}...\n" if len(transcript) > 100 else f"   └─ Content: {transcript}\n"
                 elif fd.get("transcriptUrl"):
-                    result += f"\n📄 Transcript URL: {fd['transcriptUrl']}\n"
+                    result += f"\n📜 Transcript: External URL\n"
+                    result += f"   URL: {fd['transcriptUrl']}\n"
+                else:
+                    result += f"\n📜 Transcript: Not available\n"
+                
+                if include_video and fd.get("videoUrl"):
+                    result += f"\n🎬 Video URL: {fd['videoUrl']}\n"
+                if include_audio and fd.get("audioUrl"):
+                    result += f"\n🎵 Audio URL: {fd['audioUrl']}\n"
                 
                 return result
             return f"❌ Failed: {data}"
