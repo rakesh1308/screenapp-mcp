@@ -436,7 +436,9 @@ async def execute_tool(name: str, args: dict) -> str:
                             chunk_size = 300
                             num_chunks = int((last_end / chunk_size)) + (1 if last_end % chunk_size > 0 else 0)
                             result += f"   ├─ Chunks (300s): {num_chunks} chunks\n"
-                            result += f"   └─ Tip: Use get_all_transcripts(fileId=\"{file_id}\") for full transcript\n"
+                            result += f"   └─ Options:\n"
+                            result += f"      • get_all_transcripts(fileId=\"{file_id}\") - fetch ALL at once\n"
+                            result += f"      • get_transcript_chunks(fileId=\"{file_id}\", start=X, end=Y) - one by one\n"
                         elif text:
                             result += f"   └─ Text only (no segment timestamps)\n"
                     elif isinstance(transcript, str):
