@@ -77,6 +77,18 @@ TOOLS = [
         }
     },
     {
+        "name": "get_all_transcripts",
+        "description": "Smart tool that automatically fetches ALL transcript chunks for a file. Use this instead of calling get_transcript_chunks multiple times.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fileId": {"type": "string", "description": "ID of the file/recording"},
+                "chunk_size": {"type": "number", "default": 600, "description": "Size of each chunk in seconds (default: 600s = 10min)"}
+            },
+            "required": ["fileId"]
+        }
+    },
+    {
         "name": "get_file_info",
         "description": "Get detailed information about a specific file including metadata, status, and transcript.",
         "inputSchema": {
@@ -218,13 +230,22 @@ async def execute_tool(name: str, args: dict) -> str:
                             last_end = all_segments[-1].get("start", 0) + 10  # Approximate
                             
                             if total_chars > max_chars or (all_segments and last_end > (end or last_end)):
-                                result += f"\n\n{'='*50}\n"
+                                # Calculate total chunks needed
+                                chunk_size = 300
+                                total_duration = last_end
+                                num_chunks = int((total_duration / chunk_size)) + (1 if total_duration % chunk_size > 0 else 0)
+                                
+                                result += f"\n\n{'='*60}\n"
                                 result += f"⚠️ OUTPUT TRUNCATED (showing ~{max_chars} chars)\n"
-                                result += f"📍 Available range: {first_start}s - {last_end}s\n"
-                                result += f"💡 To get more: use get_transcript_chunks(fileId=\"{file_id}\", start=0, end=300)\n"
-                                result += f"   Then: get_transcript_chunks(fileId=\"{file_id}\", start=300, end=600)\n"
-                                result += f"   And so on...\n"
-                                result += f"{'='*50}"
+                                result += f"📊 Video duration: {total_duration:.0f}s ({total_duration/60:.1f} min)\n"
+                                result += f"📍 Transcript available: {first_start:.0f}s - {last_end:.0f}s\n"
+                                result += f"🔢 Chunks needed: {num_chunks} (300s each)\n"
+                                result += f"\n💡 Fetch ALL chunks:\n"
+                                for i in range(num_chunks):
+                                    c_start = i * chunk_size
+                                    c_end = min((i + 1) * chunk_size, total_duration)
+                                    result += f"   get_transcript_chunks(fileId=\"{file_id}\", start={c_start}, end={c_end})\n"
+                                result += f"{'='*60}"
                 elif fd.get("transcriptUrl"):
                     result += f"\n📄 Transcript URL: {fd['transcriptUrl']}"
                 else:
@@ -297,6 +318,74 @@ async def execute_tool(name: str, args: dict) -> str:
                     result += "⚠️ No transcript available\n"
                 
                 return result
+            return f"❌ Failed: {data}"
+        
+        # GET ALL TRANSCRIPTS (smart - auto fetch all chunks)
+        elif name == "get_all_transcripts":
+            file_id = args["fileId"]
+            chunk_size = args.get("chunk_size", 600)  # 10 min chunks
+            
+            r = await client.get(f"{BASE_URL}/v2/files/{file_id}")
+            r.raise_for_status()
+            data = r.json()
+            
+            if data.get("success") and data.get("data"):
+                fd = data["data"]
+                name = fd.get("name", "Untitled")
+                transcript = fd.get("transcript")
+                
+                result = f"📄 {name} | ID: {file_id}\n"
+                result += f"🔄 Auto-fetching ALL transcript chunks (chunk size: {chunk_size}s)\n\n"
+                
+                if transcript and isinstance(transcript, dict) and "segments" in transcript:
+                    segments = transcript["segments"]
+                    if segments:
+                        first_start = segments[0].get("start", 0)
+                        last_end = segments[-1].get("start", 0) + 10
+                        total_duration = last_end
+                        
+                        num_chunks = int((total_duration / chunk_size)) + (1 if total_duration % chunk_size > 0 else 0)
+                        
+                        result += f"📊 Total duration: {total_duration:.0f}s ({total_duration/60:.1f} min)\n"
+                        result += f"📦 Fetching {num_chunks} chunks...\n"
+                        result += f"{'='*60}\n\n"
+                        
+                        fetched = 0
+                        for i in range(num_chunks):
+                            chunk_start = i * chunk_size
+                            chunk_end = min((i + 1) * chunk_size, total_duration)
+                            
+                            # Filter segments for this chunk
+                            chunk_segs = [s for s in segments if chunk_start <= s.get("start", 0) < chunk_end]
+                            
+                            result += f"📍 [{chunk_start:.0f}s - {chunk_end:.0f}s] "
+                            if chunk_segs:
+                                result += f"({len(chunk_segs)} segments)\n"
+                                for seg in chunk_segs:
+                                    s_start = seg.get("start", 0)
+                                    text = seg.get("text", "")
+                                    speaker = seg.get("speaker", "Unknown")
+                                    result += f"  [{s_start:.0f}s] {speaker}: {text}\n"
+                                fetched += 1
+                            else:
+                                result += "(no content)\n"
+                            
+                            # Add separator between chunks
+                            if i < num_chunks - 1:
+                                result += f"\n{'─'*40}\n\n"
+                        
+                        result += f"{'='*60}\n"
+                        result += f"✅ Fetched {fetched}/{num_chunks} chunks with content"
+                        
+                        return result
+                    else:
+                        return f"📄 {name}\n⚠️ No segments found in transcript"
+                elif transcript and isinstance(transcript, str):
+                    result += f"📜 Transcript:\n{transcript}"
+                    return result
+                else:
+                    return f"📄 {name}\n⚠️ No transcript available"
+            
             return f"❌ Failed: {data}"
         
         # GET FILE INFO
