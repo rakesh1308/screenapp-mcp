@@ -1,0 +1,11 @@
+{
+  "$schema": "https://zeabur.com/zeabur.schema.json",
+  "build": {
+    "type": "dockerfile",
+    "dockerfile": "Dockerfile"
+  },
+  "healthcheck": {
+    "path": "/health",
+    "port": 8000
+  }
+}

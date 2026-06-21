@@ -48,3 +48,13 @@ logs/
 
 # MCP specific
 .kite_token
+
+# Local test fixtures
+test_req.json
+test_*.json
+!.env.example
+
+# Cline / IDE worktrees
+.claude/
+.idea/
+.vscode/

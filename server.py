@@ -16,21 +16,28 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("screenapp-mcp")
 
-API_KEY = os.getenv("SCREENAPP_API_TOKEN")
-TEAM_ID = os.getenv("SCREENAPP_TEAM_ID")
+API_KEY = os.getenv("SCREENAPP_API_TOKEN", "")
+TEAM_ID = os.getenv("SCREENAPP_TEAM_ID", "")
 BASE_URL = "https://api.screenapp.io"
 
+# Validate env vars - warn but don't crash so deploys succeed and
+# missing config is visible in logs (Zeabur-style resilient startup)
 if not API_KEY or not TEAM_ID:
-    raise ValueError("SCREENAPP_API_TOKEN and SCREENAPP_TEAM_ID required in .env")
+    logger.warning(
+        "SCREENAPP_API_TOKEN and/or SCREENAPP_TEAM_ID not set. "
+        "Set them in Zeabur's Environment Variables panel. "
+        "API calls will fail with 401 until configured."
+    )
 
-client = httpx.AsyncClient(
-    headers={
-        "Authorization": f"Bearer {API_KEY}",
-        "X-Team-ID": TEAM_ID,
-        "Content-Type": "application/json"
-    },
-    timeout=60.0
-)
+def _build_client() -> httpx.AsyncClient:
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
+    if TEAM_ID:
+        headers["X-Team-ID"] = TEAM_ID
+    return httpx.AsyncClient(headers=headers, timeout=60.0)
+
+client = _build_client()
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -130,6 +137,14 @@ TOOLS = [
     }
 ]
 
+
+def get_file_data(data: dict) -> tuple:
+    """Extract file data from API response - handles nested file object"""
+    fd = data.get("data", {})
+    file_obj = fd.get("file", fd)  # API wraps in file object
+    return file_obj.get("name", "Unknown"), file_obj.get("duration", 0), fd
+
+
 async def execute_tool(name: str, args: dict) -> str:
     """Execute tool"""
     try:
@@ -162,7 +177,7 @@ async def execute_tool(name: str, args: dict) -> str:
                     name = f.get("name", "Untitled")
                     duration = f.get("duration", 0)
                     status = f.get("status", "unknown")
-                    result += f"{i}. {name}\n   ID: {file_id} | {duration}s | {status}\n\n"
+                    result += f"{i}. {name}\n   ID: {file_id} | {duration}s ({duration/60:.1f} min) | {status}\n\n"
                 
                 if "cursor" in data:
                     result += f"📍 Next: list_folder_files(cursor=\"{data['cursor']}\")"
@@ -175,7 +190,7 @@ async def execute_tool(name: str, args: dict) -> str:
             file_id = args["fileId"]
             start = args.get("start", 0)
             end = args.get("end", None)
-            max_chars = args.get("max_chars", 8000)  # Limit output to prevent overflow
+            max_chars = args.get("max_chars", 8000)
             
             r = await client.get(f"{BASE_URL}/v2/files/{file_id}")
             r.raise_for_status()
@@ -183,11 +198,12 @@ async def execute_tool(name: str, args: dict) -> str:
             
             if data.get("success") and data.get("data"):
                 fd = data["data"]
-                name = fd.get("name", "Untitled")
-                duration = fd.get("duration", 0)
+                file_obj = fd.get("file", fd)
+                name = file_obj.get("name", fd.get("name", "Untitled"))
+                duration = file_obj.get("duration", fd.get("duration", 0))
                 transcript = fd.get("transcript")
                 
-                result = f"📄 {name}\n   Duration: {duration}s | ID: {file_id}\n"
+                result = f"📄 {name}\n   Duration: {duration}s ({duration/60:.1f} min) | ID: {file_id}\n"
                 
                 if transcript:
                     t = transcript
@@ -204,14 +220,12 @@ async def execute_tool(name: str, args: dict) -> str:
                             segments = all_segments
                             result += f"\n📜 Transcript\n"
                         
-                        # Add text if available (up to limit)
                         if full_text and start == 0:
                             if len(full_text) > max_chars:
                                 result += full_text[:max_chars]
                             else:
                                 result += full_text
                         else:
-                            # Add segments
                             for seg in segments:
                                 seg_start = seg.get("start", 0)
                                 text = seg.get("text", "")
@@ -222,17 +236,15 @@ async def execute_tool(name: str, args: dict) -> str:
                                 else:
                                     break
                         
-                        # Check if content was truncated
-                        total_chars = len(full_text) if full_text else sum(len(s.get("text","")) for s in segments)
+                        total_chars = len(full_text) if full_text else sum(len(s.get("text","")) for s in all_segments)
                         
                         if all_segments:
                             first_start = all_segments[0].get("start", 0)
-                            last_end = all_segments[-1].get("start", 0) + 10  # Approximate
+                            last_end = all_segments[-1].get("start", 0) + 10
                             
                             if total_chars > max_chars or (all_segments and last_end > (end or last_end)):
-                                # Calculate total chunks needed
                                 chunk_size = 300
-                                total_duration = last_end
+                                total_duration = max(duration, last_end)
                                 num_chunks = int((total_duration / chunk_size)) + (1 if total_duration % chunk_size > 0 else 0)
                                 
                                 result += f"\n\n{'='*60}\n"
@@ -246,15 +258,15 @@ async def execute_tool(name: str, args: dict) -> str:
                                     c_end = min((i + 1) * chunk_size, total_duration)
                                     result += f"   get_transcript_chunks(fileId=\"{file_id}\", start={c_start}, end={c_end})\n"
                                 result += f"{'='*60}"
-                elif fd.get("transcriptUrl"):
-                    result += f"\n📄 Transcript URL: {fd['transcriptUrl']}"
+                elif file_obj.get("transcriptUrl"):
+                    result += f"\n📄 Transcript URL: {file_obj['transcriptUrl']}"
                 else:
                     result += "\n⚠️ No transcript"
                 
                 return result
             return f"❌ Failed: {data}"
         
-        # GET TRANSCRIPT CHUNKS (for large recordings)
+        # GET TRANSCRIPT CHUNKS
         elif name == "get_transcript_chunks":
             file_id = args["fileId"]
             start = args.get("start", 0)
@@ -267,10 +279,11 @@ async def execute_tool(name: str, args: dict) -> str:
             
             if data.get("success") and data.get("data"):
                 fd = data["data"]
-                name = fd.get("name", "Untitled")
-                duration = fd.get("duration", 0)
+                file_obj = fd.get("file", fd)
+                name = file_obj.get("name", fd.get("name", "Untitled"))
+                duration = file_obj.get("duration", fd.get("duration", 0))
                 
-                result = f"📄 {name} | Duration: {duration}s | Range: {start}s - {end}s\n"
+                result = f"📄 {name} | Duration: {duration}s ({duration/60:.1f} min) | Range: {start}s - {end}s\n"
                 result += f"   Chunk size: {chunk_size}s | ID: {file_id}\n\n"
                 
                 if fd.get("transcript"):
@@ -278,16 +291,12 @@ async def execute_tool(name: str, args: dict) -> str:
                     segments = []
                     
                     if isinstance(t, str):
-                        # String transcript - just return it
                         result += f"📜 Transcript (0s - end):\n{t}"
                     elif isinstance(t, dict) and "segments" in t:
                         segments = t["segments"]
-                        
-                        # Filter segments within time range
                         filtered = [s for s in segments if start <= s.get("start", 0) <= end]
                         
                         if filtered:
-                            # Group by chunks
                             num_chunks = max(1, int((end - start) / chunk_size))
                             for chunk_idx in range(num_chunks):
                                 chunk_start = start + (chunk_idx * chunk_size)
@@ -320,10 +329,10 @@ async def execute_tool(name: str, args: dict) -> str:
                 return result
             return f"❌ Failed: {data}"
         
-        # GET ALL TRANSCRIPTS (smart - auto fetch all chunks)
+        # GET ALL TRANSCRIPTS
         elif name == "get_all_transcripts":
             file_id = args["fileId"]
-            chunk_size = args.get("chunk_size", 600)  # 10 min chunks
+            chunk_size = args.get("chunk_size", 600)
             
             r = await client.get(f"{BASE_URL}/v2/files/{file_id}")
             r.raise_for_status()
@@ -331,7 +340,9 @@ async def execute_tool(name: str, args: dict) -> str:
             
             if data.get("success") and data.get("data"):
                 fd = data["data"]
-                name = fd.get("name", "Untitled")
+                file_obj = fd.get("file", fd)
+                name = file_obj.get("name", fd.get("name", "Untitled"))
+                duration = file_obj.get("duration", fd.get("duration", 0))
                 transcript = fd.get("transcript")
                 
                 result = f"📄 {name} | ID: {file_id}\n"
@@ -342,7 +353,7 @@ async def execute_tool(name: str, args: dict) -> str:
                     if segments:
                         first_start = segments[0].get("start", 0)
                         last_end = segments[-1].get("start", 0) + 10
-                        total_duration = last_end
+                        total_duration = max(duration, last_end)
                         
                         num_chunks = int((total_duration / chunk_size)) + (1 if total_duration % chunk_size > 0 else 0)
                         
@@ -355,7 +366,6 @@ async def execute_tool(name: str, args: dict) -> str:
                             chunk_start = i * chunk_size
                             chunk_end = min((i + 1) * chunk_size, total_duration)
                             
-                            # Filter segments for this chunk
                             chunk_segs = [s for s in segments if chunk_start <= s.get("start", 0) < chunk_end]
                             
                             result += f"📍 [{chunk_start:.0f}s - {chunk_end:.0f}s] "
@@ -370,7 +380,6 @@ async def execute_tool(name: str, args: dict) -> str:
                             else:
                                 result += "(no content)\n"
                             
-                            # Add separator between chunks
                             if i < num_chunks - 1:
                                 result += f"\n{'─'*40}\n\n"
                         
@@ -404,19 +413,19 @@ async def execute_tool(name: str, args: dict) -> str:
             
             if data.get("success") and data.get("data"):
                 fd = data["data"]
-                name = fd.get("name", "Unknown")
-                duration = fd.get("duration", 0)
-                status = fd.get("status", "unknown")
+                file_obj = fd.get("file", fd)
+                name = file_obj.get("name", fd.get("name", "Unknown"))
+                duration = file_obj.get("duration", fd.get("duration", 0))
+                status = file_obj.get("status", fd.get("status", "unknown"))
                 
                 result = f"📄 {name}\n"
                 result += f"   ID: {file_id}\n"
                 result += f"   Duration: {duration}s ({duration/60:.1f} min)\n"
                 result += f"   Status: {status}\n"
                 
-                if "createdAt" in fd:
-                    result += f"   Created: {fd['createdAt']}\n"
+                if "createdAt" in file_obj:
+                    result += f"   Created: {file_obj['createdAt']}\n"
                 
-                # Transcript metadata
                 transcript = fd.get("transcript")
                 if transcript:
                     result += f"\n📜 Transcript: Available\n"
@@ -432,10 +441,10 @@ async def execute_tool(name: str, args: dict) -> str:
                             last_end = segments[-1].get("start", 0) + 10
                             result += f"   ├─ Range: {first_start:.0f}s - {last_end:.0f}s\n"
                             
-                            # Calculate chunks needed
                             chunk_size = 300
-                            num_chunks = int((last_end / chunk_size)) + (1 if last_end % chunk_size > 0 else 0)
-                            result += f"   ├─ Chunks (300s): {num_chunks} chunks\n"
+                            total_duration = max(duration, last_end)
+                            num_chunks = int((total_duration / chunk_size)) + (1 if total_duration % chunk_size > 0 else 0)
+                            result += f"   ├─ Chunks (300s): {num_chunks} chunks needed for {total_duration:.0f}s video\n"
                             result += f"   └─ Options:\n"
                             result += f"      • get_all_transcripts(fileId=\"{file_id}\") - fetch ALL at once\n"
                             result += f"      • get_transcript_chunks(fileId=\"{file_id}\", start=X, end=Y) - one by one\n"
@@ -445,16 +454,16 @@ async def execute_tool(name: str, args: dict) -> str:
                         result += f"   ├─ Type: Plain text\n"
                         result += f"   ├─ Length: {len(transcript)} chars\n"
                         result += f"   └─ Content preview: {transcript[:100]}...\n" if len(transcript) > 100 else f"   └─ Content: {transcript}\n"
-                elif fd.get("transcriptUrl"):
+                elif file_obj.get("transcriptUrl"):
                     result += f"\n📜 Transcript: External URL\n"
-                    result += f"   URL: {fd['transcriptUrl']}\n"
+                    result += f"   URL: {file_obj['transcriptUrl']}\n"
                 else:
                     result += f"\n📜 Transcript: Not available\n"
                 
-                if include_video and fd.get("videoUrl"):
-                    result += f"\n🎬 Video URL: {fd['videoUrl']}\n"
-                if include_audio and fd.get("audioUrl"):
-                    result += f"\n🎵 Audio URL: {fd['audioUrl']}\n"
+                if include_video and file_obj.get("videoUrl"):
+                    result += f"\n🎬 Video URL: {file_obj['videoUrl']}\n"
+                if include_audio and file_obj.get("audioUrl"):
+                    result += f"\n🎵 Audio URL: {file_obj['audioUrl']}\n"
                 
                 return result
             return f"❌ Failed: {data}"
@@ -520,7 +529,7 @@ async def health():
 async def root():
     return {
         "service": "screenapp-mcp",
-        "version": "1.0.0",
+        "version": "1.1.0",  # Version bump with fix
         "tools": [t["name"] for t in TOOLS],
         "workflow": "list_folder_files → get_file_transcript"
     }
@@ -557,7 +566,7 @@ async def handle_request(body: dict):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}, "prompts": {}, "resources": {}},
-                "serverInfo": {"name": "screenapp-mcp", "version": "1.0.0"}
+                "serverInfo": {"name": "screenapp-mcp", "version": "1.1.0"}
             }
         }
     
