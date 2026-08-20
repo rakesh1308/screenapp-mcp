@@ -145,9 +145,18 @@ def get_file_data(data: dict) -> tuple:
     return file_obj.get("name", "Unknown"), file_obj.get("duration", 0), fd
 
 
+TOOLS_REQUIRING_FILE_ID = {
+    "get_file_transcript", "get_transcript_chunks", "get_all_transcripts",
+    "get_file_info", "ask_recording", "add_file_tag"
+}
+
+
 async def execute_tool(name: str, args: dict) -> str:
     """Execute tool"""
     try:
+        if name in TOOLS_REQUIRING_FILE_ID and not args.get("fileId"):
+            return "❌ Missing required parameter 'fileId'. Call list_folder_files first to get a file ID."
+
         # LIST FOLDER FILES
         if name == "list_folder_files":
             folder_id = args.get("folderId", "__default")
@@ -471,7 +480,9 @@ async def execute_tool(name: str, args: dict) -> str:
         # ASK RECORDING
         elif name == "ask_recording":
             file_id = args["fileId"]
-            question = args["question"]
+            question = args.get("question")
+            if not question:
+                return "❌ Missing required parameter 'question'."
             
             r = await client.post(
                 f"{BASE_URL}/v2/files/{file_id}/ask/multimodal",
@@ -505,12 +516,17 @@ async def execute_tool(name: str, args: dict) -> str:
         
         # ADD FILE TAG
         elif name == "add_file_tag":
+            key = args.get("key")
+            value = args.get("value")
+            if not key or value is None:
+                return "❌ Missing required parameter(s): 'key' and/or 'value'."
+
             r = await client.post(
                 f"{BASE_URL}/v2/files/{args['fileId']}/tag",
-                json={"key": args["key"], "value": args["value"]}
+                json={"key": key, "value": value}
             )
             r.raise_for_status()
-            return f"✅ Tagged: {args['key']} = {args['value']}"
+            return f"✅ Tagged: {key} = {value}"
         
         return f"❌ Unknown: {name}"
     
