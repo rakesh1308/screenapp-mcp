@@ -217,24 +217,49 @@ async def execute_tool(name: str, args: dict) -> str:
                 if transcript:
                     t = transcript
                     if isinstance(t, str):
-                        result += f"\n📜 Transcript:\n{t[:max_chars]}"
+                        # Plain-string transcript: no per-char timestamps. With both
+                        # bounds at defaults, dump the string. Otherwise clip by
+                        # character ratio as a best-effort approximation.
+                        if (start, end) == (0, None):
+                            result += f"\n📜 Transcript:\n{t[:max_chars]}"
+                        else:
+                            duration_for_clip = duration or len(t)
+                            cs = int(len(t) * (start / max(duration_for_clip, 1)))
+                            ce = int(len(t) * ((end or duration_for_clip) / max(duration_for_clip, 1)))
+                            body = t[cs:ce]
+                            result += f"\n📜 Transcript (approx {start}s - {end or duration_for_clip}s)\n{body[:max_chars]}"
+                            if len(body) > max_chars:
+                                result += f"\n\n⚠️ Truncated to {max_chars} chars."
                     elif isinstance(t, dict):
                         all_segments = t.get("segments", [])
                         full_text = t.get("text", "")
-                        
+
                         if end is not None:
                             segments = [s for s in all_segments if start <= s.get("start", 0) <= end]
                             result += f"\n📜 Transcript (Range: {start}s - {end}s)\n"
                         else:
                             segments = all_segments
                             result += f"\n📜 Transcript\n"
-                        
-                        if full_text and start == 0:
+
+                        # Only treat `full_text` as authoritative when *both* bounds
+                        # are at their defaults (start=0, end=None). Otherwise the
+                        # segment-filtered view is the only thing that actually
+                        # honours the requested range — the labelled header is then
+                        # honest about the body it produced.
+                        if full_text and (start, end) == (0, None):
                             if len(full_text) > max_chars:
                                 result += full_text[:max_chars]
                             else:
                                 result += full_text
                         else:
+                            if not segments:
+                                result += f"⚠️ No segments between {start}s and {end}s.\n"
+                                if all_segments:
+                                    result += (
+                                        f"   Available: "
+                                        f"{all_segments[0].get('start', 0)}s - "
+                                        f"{all_segments[-1].get('start', 0)}s\n"
+                                    )
                             for seg in segments:
                                 seg_start = seg.get("start", 0)
                                 text = seg.get("text", "")
@@ -246,18 +271,33 @@ async def execute_tool(name: str, args: dict) -> str:
                                     break
                         
                         total_chars = len(full_text) if full_text else sum(len(s.get("text","")) for s in all_segments)
-                        
+
                         if all_segments:
                             first_start = all_segments[0].get("start", 0)
                             last_end = all_segments[-1].get("start", 0) + 10
-                            
-                            if total_chars > max_chars or (all_segments and last_end > (end or last_end)):
+
+                            # Only show the truncation hint when the *displayed* slice
+                            # actually overflowed. If the user asked for a sub-range,
+                            # the size of the underlying full_text is irrelevant —
+                            # only the slice they asked for matters.
+                            requested_range = (start, end) != (0, None)
+                            slice_chars = (
+                                sum(len(s.get("text", "")) for s in segments)
+                                if requested_range else total_chars
+                            )
+                            slice_truncated = slice_chars > max_chars
+                            # If a range was requested but the slice still
+                            # ends before `end`, point at the rest of the recording.
+                            more_available = last_end > (end or last_end)
+
+                            if slice_truncated or more_available:
                                 chunk_size = 300
                                 total_duration = max(duration, last_end)
                                 num_chunks = int((total_duration / chunk_size)) + (1 if total_duration % chunk_size > 0 else 0)
-                                
+
                                 result += f"\n\n{'='*60}\n"
-                                result += f"⚠️ OUTPUT TRUNCATED (showing ~{max_chars} chars)\n"
+                                if slice_truncated:
+                                    result += f"⚠️ OUTPUT TRUNCATED (showing ~{max_chars} chars)\n"
                                 result += f"📊 Video duration: {total_duration:.0f}s ({total_duration/60:.1f} min)\n"
                                 result += f"📍 Transcript available: {first_start:.0f}s - {last_end:.0f}s\n"
                                 result += f"🔢 Chunks needed: {num_chunks} (300s each)\n"
