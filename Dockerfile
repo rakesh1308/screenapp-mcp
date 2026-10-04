@@ -10,11 +10,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Copy application code
 COPY server.py .
 
-# Defaults — must be overridden in Zeabur's Environment Variables panel.
-# The server warns (but does not crash) if these are empty, so the
+# Defaults - must be overridden in Zeabur's Environment Variables panel.
+# The server warns (but does not crash) if this is empty, so the
 # container starts and the user can read the warning in logs.
-ENV SCREENAPP_API_TOKEN=""
-ENV SCREENAPP_TEAM_ID=""
+ENV SCREENAPP_API_KEY=""
 ENV PORT=8000
 
 EXPOSE 8000

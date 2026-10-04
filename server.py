@@ -1,10 +1,25 @@
 """
-ScreenApp MCP Server - Clean Version
-Workflow: list files → fetch transcript for each file
+ScreenApp MCP Server (v2 - ScreenApp v1 API)
+Migration from legacy api.screenapp.io/v2 to the current screenapp.io/app/api/v1.
+
+API contract (verified 2026-09):
+  Base URL : https://screenapp.io/app/api/v1
+  Auth     : x-api-key: <SCREENAPP_API_KEY>
+  Scopes   : files:read, files:upload
+  Errors   : 401 (no/invalid key), 403 (insufficient scope),
+             409 (transcript not ready), 429 (rate limit - honour Retry-After)
+
+Endpoints:
+  GET  /me                      -> account / scope check
+  GET  /videos                  -> list videos
+  GET  /videos/{id}             -> status + metadata
+  GET  /videos/{id}/transcript  -> transcript (poll until transcriptStatus=ready)
+  POST /videos                  -> upload (multipart file OR JSON {url})
 """
 import os
 import json
 import logging
+import asyncio
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -16,551 +31,386 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("screenapp-mcp")
 
-API_KEY = os.getenv("SCREENAPP_API_TOKEN", "")
-TEAM_ID = os.getenv("SCREENAPP_TEAM_ID", "")
-BASE_URL = "https://api.screenapp.io"
+API_KEY = os.getenv("SCREENAPP_API_KEY", "")
+BASE_URL = "https://screenapp.io/app/api/v1"
 
-# Validate env vars - warn but don't crash so deploys succeed and
-# missing config is visible in logs (Zeabur-style resilient startup)
-if not API_KEY or not TEAM_ID:
+if not API_KEY:
     logger.warning(
-        "SCREENAPP_API_TOKEN and/or SCREENAPP_TEAM_ID not set. "
-        "Set them in Zeabur's Environment Variables panel. "
+        "SCREENAPP_API_KEY not set. "
+        "Set it in Zeabur -> Environment Variables. "
         "API calls will fail with 401 until configured."
     )
+
 
 def _build_client() -> httpx.AsyncClient:
     headers = {"Content-Type": "application/json"}
     if API_KEY:
-        headers["Authorization"] = f"Bearer {API_KEY}"
-    if TEAM_ID:
-        headers["X-Team-ID"] = TEAM_ID
+        headers["x-api-key"] = API_KEY
     return httpx.AsyncClient(headers=headers, timeout=60.0)
+
 
 client = _build_client()
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Clean tools - focused on file listing and transcript fetching
 TOOLS = [
     {
-        "name": "list_folder_files",
-        "description": "List all files in a folder. Returns file IDs, names, durations, and status. Use '__default' for root folder.",
+        "name": "list_videos",
+        "description": (
+            "List recordings (videos) available to the API key. "
+            "Returns id, name, duration, status, transcriptStatus."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "folderId": {"type": "string", "default": "__default", "description": "Folder ID (use '__default' for root)"},
-                "cursor": {"type": "string", "description": "Pagination cursor"},
-                "limit": {"type": "integer", "default": 50, "description": "Max files to return"}
-            }
-        }
+                "limit": {
+                    "type": "integer",
+                    "default": 50,
+                    "description": "Max videos to return (1-100)",
+                }
+            },
+        },
     },
     {
-        "name": "get_file_transcript",
-        "description": "Get raw transcript for a single recording/file. Optionally specify time range (start/end in seconds) to fetch specific portions.",
+        "name": "get_video_info",
+        "description": (
+            "Get status + metadata for a single video. "
+            "Use this to check transcriptStatus before fetching the transcript."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "fileId": {"type": "string", "description": "ID of the file/recording"},
-                "start": {"type": "number", "description": "Start time in seconds (default: 0)"},
-                "end": {"type": "number", "description": "End time in seconds (default: full duration)"}
+                "videoId": {"type": "string", "description": "ID of the video"}
             },
-            "required": ["fileId"]
-        }
+            "required": ["videoId"],
+        },
     },
     {
-        "name": "get_transcript_chunks",
-        "description": "Get transcript in time chunks. Useful for large recordings. Returns segments within the specified time range.",
+        "name": "get_video_transcript",
+        "description": (
+            "Get the transcript for a video. "
+            "If transcript is not ready yet (HTTP 409), automatically polls every "
+            "2 s for up to ~5 minutes and returns the transcript when ready."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "fileId": {"type": "string", "description": "ID of the file/recording"},
-                "start": {"type": "number", "description": "Start time in seconds"},
-                "end": {"type": "number", "description": "End time in seconds"},
-                "chunk_size": {"type": "number", "default": 300, "description": "Chunk size in seconds"}
+                "videoId": {"type": "string", "description": "ID of the video"},
+                "max_chars": {
+                    "type": "integer",
+                    "default": 8000,
+                    "description": "Soft cap on returned characters (default 8000)",
+                },
             },
-            "required": ["fileId", "start", "end"]
-        }
+            "required": ["videoId"],
+        },
     },
     {
-        "name": "get_all_transcripts",
-        "description": "Smart tool that automatically fetches ALL transcript chunks for a file. Use this instead of calling get_transcript_chunks multiple times.",
+        "name": "upload_video",
+        "description": (
+            "Upload a recording to ScreenApp from a public URL. "
+            "Requires a key with files:upload scope. "
+            "Returns the new video id - processing continues in the background; "
+            "poll with get_video_info until transcriptStatus=ready."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "fileId": {"type": "string", "description": "ID of the file/recording"},
-                "chunk_size": {"type": "number", "default": 600, "description": "Size of each chunk in seconds (default: 600s = 10min)"}
+                "url": {
+                    "type": "string",
+                    "description": "Public URL of the file to import",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional display name for the upload",
+                },
             },
-            "required": ["fileId"]
-        }
+            "required": ["url"],
+        },
     },
     {
-        "name": "get_file_info",
-        "description": "Get detailed information about a specific file including metadata, status, and transcript.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "fileId": {"type": "string", "description": "ID of the file"},
-                "includeVideoUrl": {"type": "boolean", "default": False, "description": "Include video download URL"},
-                "includeAudioUrl": {"type": "boolean", "default": False, "description": "Include audio download URL"}
-            },
-            "required": ["fileId"]
-        }
+        "name": "get_account_context",
+        "description": (
+            "Return the authenticated account/team context bound to the API key. "
+            "Useful to verify the key works and discover the user/team identity."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
     },
-    {
-        "name": "ask_recording",
-        "description": "Ask AI a question about a recording. Analyzes transcript to answer your question.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "fileId": {"type": "string", "description": "ID of the file to analyze"},
-                "question": {"type": "string", "description": "Question to ask about the recording"},
-                "transcript_start": {"type": "number", "default": 0, "description": "Transcript analysis start time (seconds)"},
-                "transcript_end": {"type": "number", "default": 300, "description": "Transcript analysis end time (seconds)"}
-            },
-            "required": ["fileId", "question"]
-        }
-    },
-    {
-        "name": "add_file_tag",
-        "description": "Add a metadata tag to a file/recording",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "fileId": {"type": "string", "description": "ID of the file"},
-                "key": {"type": "string", "description": "Tag key"},
-                "value": {"type": "string", "description": "Tag value"}
-            },
-            "required": ["fileId", "key", "value"]
-        }
-    }
 ]
 
 
-def get_file_data(data: dict) -> tuple:
-    """Extract file data from API response - handles nested file object"""
-    fd = data.get("data", {})
-    file_obj = fd.get("file", fd)  # API wraps in file object
-    return file_obj.get("name", "Unknown"), file_obj.get("duration", 0), fd
+def _err(status: int, body: str) -> str:
+    snippet = body[:300] if body else ""
+    return f"❌ ScreenApp API error ({status}): {snippet}"
 
 
-TOOLS_REQUIRING_FILE_ID = {
-    "get_file_transcript", "get_transcript_chunks", "get_all_transcripts",
-    "get_file_info", "ask_recording", "add_file_tag"
+async def _get(path: str, params: dict | None = None) -> tuple[int, dict]:
+    try:
+        r = await client.get(f"{BASE_URL}{path}", params=params or {})
+    except httpx.HTTPError as e:
+        return 0, {"error": str(e)}
+    try:
+        return r.status_code, r.json()
+    except Exception:
+        return r.status_code, {"raw": r.text}
+
+
+async def _post(path: str, payload: dict) -> tuple[int, dict]:
+    try:
+        r = await client.post(f"{BASE_URL}{path}", json=payload)
+    except httpx.HTTPError as e:
+        return 0, {"error": str(e)}
+    try:
+        return r.status_code, r.json()
+    except Exception:
+        return r.status_code, {"raw": r.text}
+
+
+async def _wait_for_transcript(video_id: str, max_wait_s: int = 300) -> tuple[int, dict]:
+    delay = 2
+    waited = 0
+    while waited <= max_wait_s:
+        status, data = await _get(f"/videos/{video_id}")
+        if status != 200:
+            return status, data
+        ts = (data.get("transcriptStatus")
+              or data.get("data", {}).get("transcriptStatus")
+              or "").lower()
+        if ts == "ready":
+            return status, data
+        if ts in {"failed", "error"}:
+            return status, {**data, "_transcript_error": ts}
+        await asyncio.sleep(delay)
+        waited += delay
+    return 408, {"error": f"transcript not ready after {max_wait_s}s", "last": data}
+
+
+def _format_video_line(idx: int, v: dict) -> str:
+    vid = v.get("id") or v.get("_id") or "unknown"
+    name = v.get("name") or v.get("title") or "Untitled"
+    duration = v.get("duration") or 0
+    ts = v.get("transcriptStatus") or "unknown"
+    status = v.get("status") or "unknown"
+    return (
+        f"{idx}. {name}\n"
+        f"   ID: {vid} | {duration}s ({duration/60:.1f} min) | "
+        f"status={status} | transcriptStatus={ts}\n"
+    )
+
+
+async def _list_videos(args: dict) -> str:
+    limit = min(int(args.get("limit", 50)), 100)
+    status, data = await _get("/videos", params={"limit": limit})
+    if status != 200:
+        return _err(status, json.dumps(data))
+
+    videos = (
+        data.get("videos")
+        or data.get("data", {}).get("videos")
+        or data.get("data")
+        or []
+    )
+    if not isinstance(videos, list):
+        return f"❌ Unexpected list response: {json.dumps(data)[:300]}"
+
+    out = f"📁 ScreenApp library\n📊 {len(videos)} videos (limit {limit})\n\n"
+    for i, v in enumerate(videos, 1):
+        out += _format_video_line(i, v)
+    return out.rstrip()
+
+
+async def _get_video_info(args: dict) -> str:
+    video_id = args.get("videoId")
+    if not video_id:
+        return "❌ Missing required parameter 'videoId'."
+    status, data = await _get(f"/videos/{video_id}")
+    if status != 200:
+        return _err(status, json.dumps(data))
+
+    v = data.get("data") if isinstance(data.get("data"), dict) else data
+    name = v.get("name") or v.get("title") or "Untitled"
+    duration = v.get("duration") or 0
+    ts = v.get("transcriptStatus") or "unknown"
+    st = v.get("status") or "unknown"
+
+    out = (
+        f"📄 {name}\n"
+        f"   ID: {video_id}\n"
+        f"   Duration: {duration}s ({duration/60:.1f} min)\n"
+        f"   status: {st}\n"
+        f"   transcriptStatus: {ts}\n"
+    )
+    if v.get("createdAt"):
+        out += f"   createdAt: {v['createdAt']}\n"
+    if ts == "ready":
+        out += f"\n💡 Transcript ready — call get_video_transcript(videoId=\"{video_id}\").\n"
+    elif ts in {"processing", "pending"}:
+        out += f"\n⏳ Transcript still processing — re-check shortly.\n"
+    elif ts in {"failed", "error"}:
+        out += f"\n⚠️ Transcript failed.\n"
+    return out
+
+
+async def _get_video_transcript(args: dict) -> str:
+    video_id = args.get("videoId")
+    if not video_id:
+        return "❌ Missing required parameter 'videoId'."
+    max_chars = int(args.get("max_chars", 8000))
+
+    status, meta = await _get(f"/videos/{video_id}")
+    if status != 200:
+        return _err(status, json.dumps(meta))
+
+    ts = ((meta.get("transcriptStatus")
+               or meta.get("data", {}).get("transcriptStatus") or "")).lower()
+    if ts and ts != "ready":
+        polled_status, polled = await _wait_for_transcript(video_id)
+        if polled_status != 200 or polled.get("_transcript_error"):
+            return (
+                f"⏳ Transcript not ready (status='{ts}'). "
+                f"Try again later — current: {json.dumps(polled)[:300]}"
+            )
+
+    status, data = await _get(f"/videos/{video_id}/transcript")
+    if status == 409:
+        return (
+            "⏳ Transcript not ready yet (HTTP 409). "
+            "Wait a few seconds and call again."
+        )
+    if status != 200:
+        return _err(status, json.dumps(data))
+
+    payload = data.get("data") if isinstance(data.get("data"), dict) else data
+    transcript = (
+        payload.get("transcript")
+        or payload.get("text")
+        or (payload if isinstance(payload, str) else None)
+    )
+    if transcript is None:
+        return f"❌ Unexpected transcript response: {json.dumps(data)[:300]}"
+
+    name = payload.get("name") or payload.get("title") or video_id
+    out = f"📄 {name} | ID: {video_id}\n\n"
+
+    if isinstance(transcript, str):
+        body = transcript[:max_chars]
+        out += f"📜 Transcript:\n{body}"
+        if len(transcript) > max_chars:
+            out += f"\n\n⚠️ Truncated to {max_chars} chars of {len(transcript)}."
+        return out
+
+    segments = transcript.get("segments") or []
+    text = transcript.get("text") or ""
+    if text:
+        body = text[:max_chars]
+        out += f"📜 Transcript:\n{body}"
+        if len(text) > max_chars:
+            out += f"\n\n⚠️ Truncated to {max_chars} chars of {len(text)}."
+        return out
+
+    if not segments:
+        return f"📄 {name}\n⚠️ Transcript has no content yet."
+
+    out += "📜 Transcript segments:\n"
+    for seg in segments:
+        s = seg.get("start", 0)
+        spk = seg.get("speaker", "Unknown")
+        txt = seg.get("text", "")
+        line = f"[{s:.0f}s] {spk}: {txt}\n"
+        if len(out) + len(line) > max_chars:
+            out += f"\n⚠️ Truncated at {max_chars} chars."
+            break
+        out += line
+    return out
+
+
+async def _upload_video(args: dict) -> str:
+    url = args.get("url")
+    if not url:
+        return "❌ Missing required parameter 'url'."
+    name = args.get("name")
+    payload: dict = {"url": url}
+    if name:
+        payload["name"] = name
+    status, data = await _post("/videos", payload)
+    if status not in (200, 202):
+        return _err(status, json.dumps(data))
+    payload_data = data.get("data") if isinstance(data.get("data"), dict) else data
+    vid = payload_data.get("id") or payload_data.get("videoId")
+    return (
+        f"✅ Upload accepted.\n"
+        f"   videoId: {vid}\n"
+        f"   Poll with get_video_info(videoId=\"{vid}\") until "
+        f"transcriptStatus=ready, then call get_video_transcript."
+    )
+
+
+async def _get_account_context(_args: dict) -> str:
+    status, data = await _get("/me")
+    if status != 200:
+        return _err(status, json.dumps(data))
+    return f"👤 Account context:\n{json.dumps(data, indent=2)[:2000]}"
+
+
+TOOL_IMPLEMENTS = {
+    "list_videos": _list_videos,
+    "get_video_info": _get_video_info,
+    "get_video_transcript": _get_video_transcript,
+    "upload_video": _upload_video,
+    "get_account_context": _get_account_context,
 }
 
 
 async def execute_tool(name: str, args: dict) -> str:
-    """Execute tool"""
+    impl = TOOL_IMPLEMENTS.get(name)
+    if not impl:
+        return f"❌ Unknown tool: {name}"
     try:
-        if name in TOOLS_REQUIRING_FILE_ID and not args.get("fileId"):
-            return "❌ Missing required parameter 'fileId'. Call list_folder_files first to get a file ID."
-
-        # LIST FOLDER FILES
-        if name == "list_folder_files":
-            folder_id = args.get("folderId", "__default")
-            cursor = args.get("cursor")
-            limit = args.get("limit", 50)
-            
-            params = {"limit": min(limit, 100)}
-            if cursor:
-                params["cursor"] = cursor
-            if folder_id and folder_id != "__default":
-                params["folderId"] = folder_id
-            
-            r = await client.get(f"{BASE_URL}/v2/files", params=params)
-            r.raise_for_status()
-            data = r.json()
-            
-            if data.get("success") and data.get("data"):
-                files_data = data["data"]
-                if isinstance(files_data, dict):
-                    files = files_data.get("files", files_data.get("fileSystem", []))
-                else:
-                    files = files_data
-                
-                result = f"📁 Folder: {folder_id}\n📊 {len(files)} files\n\n"
-                for i, f in enumerate(files, 1):
-                    file_id = f.get("_id", f.get("id", "unknown"))
-                    name = f.get("name", "Untitled")
-                    duration = f.get("duration", 0)
-                    status = f.get("status", "unknown")
-                    result += f"{i}. {name}\n   ID: {file_id} | {duration}s ({duration/60:.1f} min) | {status}\n\n"
-                
-                if "cursor" in data:
-                    result += f"📍 Next: list_folder_files(cursor=\"{data['cursor']}\")"
-                
-                return result
-            return f"❌ Failed: {data}"
-        
-        # GET FILE TRANSCRIPT
-        elif name == "get_file_transcript":
-            file_id = args["fileId"]
-            start = args.get("start", 0)
-            end = args.get("end", None)
-            max_chars = args.get("max_chars", 8000)
-            
-            r = await client.get(f"{BASE_URL}/v2/files/{file_id}")
-            r.raise_for_status()
-            data = r.json()
-            
-            if data.get("success") and data.get("data"):
-                fd = data["data"]
-                file_obj = fd.get("file", fd)
-                name = file_obj.get("name", fd.get("name", "Untitled"))
-                duration = file_obj.get("duration", fd.get("duration", 0))
-                transcript = fd.get("transcript")
-                
-                result = f"📄 {name}\n   Duration: {duration}s ({duration/60:.1f} min) | ID: {file_id}\n"
-                
-                if transcript:
-                    t = transcript
-                    if isinstance(t, str):
-                        result += f"\n📜 Transcript:\n{t[:max_chars]}"
-                    elif isinstance(t, dict):
-                        all_segments = t.get("segments", [])
-                        full_text = t.get("text", "")
-                        
-                        if end is not None:
-                            segments = [s for s in all_segments if start <= s.get("start", 0) <= end]
-                            result += f"\n📜 Transcript (Range: {start}s - {end}s)\n"
-                        else:
-                            segments = all_segments
-                            result += f"\n📜 Transcript\n"
-                        
-                        if full_text and start == 0:
-                            if len(full_text) > max_chars:
-                                result += full_text[:max_chars]
-                            else:
-                                result += full_text
-                        else:
-                            for seg in segments:
-                                seg_start = seg.get("start", 0)
-                                text = seg.get("text", "")
-                                speaker = seg.get("speaker", "Unknown")
-                                line = f"\n[{seg_start:.0f}s] {speaker}: {text}"
-                                if len(result) + len(line) < max_chars:
-                                    result += line
-                                else:
-                                    break
-                        
-                        total_chars = len(full_text) if full_text else sum(len(s.get("text","")) for s in all_segments)
-                        
-                        if all_segments:
-                            first_start = all_segments[0].get("start", 0)
-                            last_end = all_segments[-1].get("start", 0) + 10
-                            
-                            if total_chars > max_chars or (all_segments and last_end > (end or last_end)):
-                                chunk_size = 300
-                                total_duration = max(duration, last_end)
-                                num_chunks = int((total_duration / chunk_size)) + (1 if total_duration % chunk_size > 0 else 0)
-                                
-                                result += f"\n\n{'='*60}\n"
-                                result += f"⚠️ OUTPUT TRUNCATED (showing ~{max_chars} chars)\n"
-                                result += f"📊 Video duration: {total_duration:.0f}s ({total_duration/60:.1f} min)\n"
-                                result += f"📍 Transcript available: {first_start:.0f}s - {last_end:.0f}s\n"
-                                result += f"🔢 Chunks needed: {num_chunks} (300s each)\n"
-                                result += f"\n💡 Fetch ALL chunks:\n"
-                                for i in range(num_chunks):
-                                    c_start = i * chunk_size
-                                    c_end = min((i + 1) * chunk_size, total_duration)
-                                    result += f"   get_transcript_chunks(fileId=\"{file_id}\", start={c_start}, end={c_end})\n"
-                                result += f"{'='*60}"
-                elif file_obj.get("transcriptUrl"):
-                    result += f"\n📄 Transcript URL: {file_obj['transcriptUrl']}"
-                else:
-                    result += "\n⚠️ No transcript"
-                
-                return result
-            return f"❌ Failed: {data}"
-        
-        # GET TRANSCRIPT CHUNKS
-        elif name == "get_transcript_chunks":
-            file_id = args["fileId"]
-            start = args.get("start", 0)
-            end = args.get("end", 300)
-            chunk_size = args.get("chunk_size", 300)
-            
-            r = await client.get(f"{BASE_URL}/v2/files/{file_id}")
-            r.raise_for_status()
-            data = r.json()
-            
-            if data.get("success") and data.get("data"):
-                fd = data["data"]
-                file_obj = fd.get("file", fd)
-                name = file_obj.get("name", fd.get("name", "Untitled"))
-                duration = file_obj.get("duration", fd.get("duration", 0))
-                
-                result = f"📄 {name} | Duration: {duration}s ({duration/60:.1f} min) | Range: {start}s - {end}s\n"
-                result += f"   Chunk size: {chunk_size}s | ID: {file_id}\n\n"
-                
-                if fd.get("transcript"):
-                    t = fd["transcript"]
-                    segments = []
-                    
-                    if isinstance(t, str):
-                        result += f"📜 Transcript (0s - end):\n{t}"
-                    elif isinstance(t, dict) and "segments" in t:
-                        segments = t["segments"]
-                        filtered = [s for s in segments if start <= s.get("start", 0) <= end]
-                        
-                        if filtered:
-                            num_chunks = max(1, int((end - start) / chunk_size))
-                            for chunk_idx in range(num_chunks):
-                                chunk_start = start + (chunk_idx * chunk_size)
-                                chunk_end = min(chunk_start + chunk_size, end)
-                                
-                                result += f"\n{'='*50}\n"
-                                result += f"📍 CHUNK {chunk_idx + 1}/{num_chunks} [{chunk_start}s - {chunk_end}s]\n"
-                                result += f"{'='*50}\n"
-                                
-                                chunk_segs = [s for s in filtered if chunk_start <= s.get("start", 0) < chunk_end]
-                                
-                                for seg in chunk_segs:
-                                    s_start = seg.get("start", 0)
-                                    text = seg.get("text", "")
-                                    speaker = seg.get("speaker", "Unknown")
-                                    result += f"[{s_start:.0f}s] {speaker}: {text}\n"
-                                
-                                if not chunk_segs:
-                                    result += "   (no segments in this range)\n"
-                        else:
-                            result += f"⚠️ No segments found between {start}s and {end}s\n"
-                            result += f"   Total segments in file: {len(segments)}\n"
-                            if segments:
-                                result += f"   Available range: {segments[0].get('start', 0)}s - {segments[-1].get('start', 0)}s\n"
-                    else:
-                        result += "⚠️ Unexpected transcript format\n"
-                else:
-                    result += "⚠️ No transcript available\n"
-                
-                return result
-            return f"❌ Failed: {data}"
-        
-        # GET ALL TRANSCRIPTS
-        elif name == "get_all_transcripts":
-            file_id = args["fileId"]
-            chunk_size = args.get("chunk_size", 600)
-            
-            r = await client.get(f"{BASE_URL}/v2/files/{file_id}")
-            r.raise_for_status()
-            data = r.json()
-            
-            if data.get("success") and data.get("data"):
-                fd = data["data"]
-                file_obj = fd.get("file", fd)
-                name = file_obj.get("name", fd.get("name", "Untitled"))
-                duration = file_obj.get("duration", fd.get("duration", 0))
-                transcript = fd.get("transcript")
-                
-                result = f"📄 {name} | ID: {file_id}\n"
-                result += f"🔄 Auto-fetching ALL transcript chunks (chunk size: {chunk_size}s)\n\n"
-                
-                if transcript and isinstance(transcript, dict) and "segments" in transcript:
-                    segments = transcript["segments"]
-                    if segments:
-                        first_start = segments[0].get("start", 0)
-                        last_end = segments[-1].get("start", 0) + 10
-                        total_duration = max(duration, last_end)
-                        
-                        num_chunks = int((total_duration / chunk_size)) + (1 if total_duration % chunk_size > 0 else 0)
-                        
-                        result += f"📊 Total duration: {total_duration:.0f}s ({total_duration/60:.1f} min)\n"
-                        result += f"📦 Fetching {num_chunks} chunks...\n"
-                        result += f"{'='*60}\n\n"
-                        
-                        fetched = 0
-                        for i in range(num_chunks):
-                            chunk_start = i * chunk_size
-                            chunk_end = min((i + 1) * chunk_size, total_duration)
-                            
-                            chunk_segs = [s for s in segments if chunk_start <= s.get("start", 0) < chunk_end]
-                            
-                            result += f"📍 [{chunk_start:.0f}s - {chunk_end:.0f}s] "
-                            if chunk_segs:
-                                result += f"({len(chunk_segs)} segments)\n"
-                                for seg in chunk_segs:
-                                    s_start = seg.get("start", 0)
-                                    text = seg.get("text", "")
-                                    speaker = seg.get("speaker", "Unknown")
-                                    result += f"  [{s_start:.0f}s] {speaker}: {text}\n"
-                                fetched += 1
-                            else:
-                                result += "(no content)\n"
-                            
-                            if i < num_chunks - 1:
-                                result += f"\n{'─'*40}\n\n"
-                        
-                        result += f"{'='*60}\n"
-                        result += f"✅ Fetched {fetched}/{num_chunks} chunks with content"
-                        
-                        return result
-                    else:
-                        return f"📄 {name}\n⚠️ No segments found in transcript"
-                elif transcript and isinstance(transcript, str):
-                    result += f"📜 Transcript:\n{transcript}"
-                    return result
-                else:
-                    return f"📄 {name}\n⚠️ No transcript available"
-            
-            return f"❌ Failed: {data}"
-        
-        # GET FILE INFO
-        elif name == "get_file_info":
-            file_id = args["fileId"]
-            include_video = args.get("includeVideoUrl", False)
-            include_audio = args.get("includeAudioUrl", False)
-            
-            params = {}
-            if include_video: params["video"] = "true"
-            if include_audio: params["audio"] = "true"
-            
-            r = await client.get(f"{BASE_URL}/v2/files/{file_id}")
-            r.raise_for_status()
-            data = r.json()
-            
-            if data.get("success") and data.get("data"):
-                fd = data["data"]
-                file_obj = fd.get("file", fd)
-                name = file_obj.get("name", fd.get("name", "Unknown"))
-                duration = file_obj.get("duration", fd.get("duration", 0))
-                status = file_obj.get("status", fd.get("status", "unknown"))
-                
-                result = f"📄 {name}\n"
-                result += f"   ID: {file_id}\n"
-                result += f"   Duration: {duration}s ({duration/60:.1f} min)\n"
-                result += f"   Status: {status}\n"
-                
-                if "createdAt" in file_obj:
-                    result += f"   Created: {file_obj['createdAt']}\n"
-                
-                transcript = fd.get("transcript")
-                if transcript:
-                    result += f"\n📜 Transcript: Available\n"
-                    if isinstance(transcript, dict):
-                        segments = transcript.get("segments", [])
-                        text = transcript.get("text", "")
-                        
-                        result += f"   ├─ Text length: {len(text)} chars\n" if text else ""
-                        result += f"   ├─ Segments: {len(segments)}\n"
-                        
-                        if segments:
-                            first_start = segments[0].get("start", 0)
-                            last_end = segments[-1].get("start", 0) + 10
-                            result += f"   ├─ Range: {first_start:.0f}s - {last_end:.0f}s\n"
-                            
-                            chunk_size = 300
-                            total_duration = max(duration, last_end)
-                            num_chunks = int((total_duration / chunk_size)) + (1 if total_duration % chunk_size > 0 else 0)
-                            result += f"   ├─ Chunks (300s): {num_chunks} chunks needed for {total_duration:.0f}s video\n"
-                            result += f"   └─ Options:\n"
-                            result += f"      • get_all_transcripts(fileId=\"{file_id}\") - fetch ALL at once\n"
-                            result += f"      • get_transcript_chunks(fileId=\"{file_id}\", start=X, end=Y) - one by one\n"
-                        elif text:
-                            result += f"   └─ Text only (no segment timestamps)\n"
-                    elif isinstance(transcript, str):
-                        result += f"   ├─ Type: Plain text\n"
-                        result += f"   ├─ Length: {len(transcript)} chars\n"
-                        result += f"   └─ Content preview: {transcript[:100]}...\n" if len(transcript) > 100 else f"   └─ Content: {transcript}\n"
-                elif file_obj.get("transcriptUrl"):
-                    result += f"\n📜 Transcript: External URL\n"
-                    result += f"   URL: {file_obj['transcriptUrl']}\n"
-                else:
-                    result += f"\n📜 Transcript: Not available\n"
-                
-                if include_video and file_obj.get("videoUrl"):
-                    result += f"\n🎬 Video URL: {file_obj['videoUrl']}\n"
-                if include_audio and file_obj.get("audioUrl"):
-                    result += f"\n🎵 Audio URL: {file_obj['audioUrl']}\n"
-                
-                return result
-            return f"❌ Failed: {data}"
-        
-        # ASK RECORDING
-        elif name == "ask_recording":
-            file_id = args["fileId"]
-            question = args.get("question")
-            if not question:
-                return "❌ Missing required parameter 'question'."
-            
-            r = await client.post(
-                f"{BASE_URL}/v2/files/{file_id}/ask/multimodal",
-                json={
-                    "promptText": question,
-                    "mediaAnalysisOptions": {
-                        "transcript": {
-                            "segments": [{
-                                "start": args.get("transcript_start", 0),
-                                "end": args.get("transcript_end", 300)
-                            }]
-                        }
-                    }
-                }
-            )
-            r.raise_for_status()
-            data = r.json()
-            
-            answer = None
-            if data.get("success") and data.get("data"):
-                answer_obj = data["data"].get("answer", {})
-                if isinstance(answer_obj, dict):
-                    answer = answer_obj.get("content", "")
-                elif isinstance(answer_obj, str):
-                    answer = answer_obj
-            
-            if not answer:
-                return "❌ No answer. Check if file has transcript."
-            
-            return f"🤖 Answer:\n\n{answer}"
-        
-        # ADD FILE TAG
-        elif name == "add_file_tag":
-            key = args.get("key")
-            value = args.get("value")
-            if not key or value is None:
-                return "❌ Missing required parameter(s): 'key' and/or 'value'."
-
-            r = await client.post(
-                f"{BASE_URL}/v2/files/{args['fileId']}/tag",
-                json={"key": key, "value": value}
-            )
-            r.raise_for_status()
-            return f"✅ Tagged: {key} = {value}"
-        
-        return f"❌ Unknown: {name}"
-    
+        return await impl(args)
     except httpx.HTTPStatusError as e:
-        return f"❌ API Error ({e.response.status_code}): {e.response.text[:200]}"
+        return _err(e.response.status_code, e.response.text)
     except Exception as e:
-        logger.error(f"Error: {e}")
-        return f"❌ Error: {str(e)}"
+        logger.exception("tool %s failed", name)
+        return f"❌ Error: {e}"
 
-# FastAPI Endpoints
+
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "tools": len(TOOLS)}
+    return {"status": "healthy", "tools": len(TOOLS), "api": "v1"}
+
 
 @app.get("/")
 async def root():
     return {
         "service": "screenapp-mcp",
-        "version": "1.1.0",  # Version bump with fix
+        "version": "2.0.0",
+        "api": "screenapp.io/app/api/v1",
         "tools": [t["name"] for t in TOOLS],
-        "workflow": "list_folder_files → get_file_transcript"
+        "workflow": "list_videos -> get_video_info -> get_video_transcript",
     }
+
 
 @app.get("/.well-known/oauth-protected-resource")
 async def oauth_resource():
     return {"issuer": "https://screenapp.io", "mcp_endpoint": "/mcp"}
 
+
 @app.options("/mcp")
 async def mcp_options():
     return JSONResponse({"status": "ok"})
 
+
 @app.head("/mcp")
 async def mcp_head():
     return JSONResponse({"status": "ready"})
+
 
 @app.post("/mcp")
 async def mcp_endpoint(request: Request):
@@ -568,64 +418,60 @@ async def mcp_endpoint(request: Request):
         body = await request.json()
         return await handle_request(body)
     except Exception as e:
-        logger.error(f"MCP error: {e}")
-        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": str(e)}}
+        logger.exception("mcp endpoint failure")
+        return {"jsonrpc": "2.0", "id": None,
+                "error": {"code": -32603, "message": str(e)}}
+
 
 async def handle_request(body: dict):
     method = body.get("method")
     req_id = body.get("id")
-    params = body.get("params", {})
-    
+    params = body.get("params", {}) or {}
+
     if method == "initialize":
         return {
             "jsonrpc": "2.0", "id": req_id,
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}, "prompts": {}, "resources": {}},
-                "serverInfo": {"name": "screenapp-mcp", "version": "1.1.0"}
-            }
+                "serverInfo": {"name": "screenapp-mcp", "version": "2.0.0"},
+            },
         }
-    
     if method == "ping":
         return {"jsonrpc": "2.0", "id": req_id, "result": {}}
-    
     if method == "notifications/initialized":
         return JSONResponse(status_code=202, content={})
-    
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
-    
     if method == "tools/call":
         name = params.get("name")
-        arguments = params.get("arguments", {})
-        
+        arguments = params.get("arguments", {}) or {}
         if not name:
-            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": "Missing tool name"}}
-        
+            return {"jsonrpc": "2.0", "id": req_id,
+                    "error": {"code": -32602, "message": "Missing tool name"}}
         result = await execute_tool(name, arguments)
-        
         return {
             "jsonrpc": "2.0", "id": req_id,
             "result": {
                 "content": [{"type": "text", "text": result}],
-                "isError": result.startswith("❌")
-            }
+                "isError": result.startswith("❌"),
+            },
         }
-    
     if method == "prompts/list":
         return {"jsonrpc": "2.0", "id": req_id, "result": {"prompts": []}}
-    
     if method == "resources/list":
         return {"jsonrpc": "2.0", "id": req_id, "result": {"resources": []}}
-    
     if method == "roots/list":
         return {"jsonrpc": "2.0", "id": req_id, "result": {"roots": []}}
-    
-    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Unknown: {method}"}}
+
+    return {"jsonrpc": "2.0", "id": req_id,
+            "error": {"code": -32601, "message": f"Unknown method: {method}"}}
+
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
-    logger.info(f"ScreenApp MCP Server - {len(TOOLS)} tools")
-    logger.info(f"Team ID: {TEAM_ID}")
+    logger.info("ScreenApp MCP Server v2.0.0 - %d tools, base=%s",
+                len(TOOLS), BASE_URL)
+    logger.info("API key configured: %s", "yes" if API_KEY else "NO (warnings expected)")
     uvicorn.run(app, host="0.0.0.0", port=port)
