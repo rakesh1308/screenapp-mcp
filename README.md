@@ -1,44 +1,42 @@
-﻿# ScreenApp MCP Server
+# ScreenApp MCP Server
 
 A remote [Model Context Protocol](https://modelcontextprotocol.io) server that
-exposes the current [ScreenApp](https://screenapp.io) recording/transcript API
-as MCP tools for Claude, Cursor and any MCP-compatible client.
+exposes the [ScreenApp](https://screenapp.io) recording/transcript API as MCP
+tools for Claude, Cursor and any MCP-compatible client.
+
+Lets an AI assistant browse a workspace's meeting recordings, pull raw or
+chunked transcripts, query a recording with natural-language questions, and
+tag files — directly from chat.
 
 Built on FastAPI + Streamable HTTP, designed to deploy to **Zeabur** with one click.
-
-> **v2.0.0 — API migration.** This server now targets ScreenApp's current
-> `app/api/v1` (x-api-key auth). The previous `api.screenapp.io/v2` legacy
-> service is no longer used.
 
 ---
 
 ## Workflow
 
 ```
-list_videos → pick a videoId
-      ↓
-get_video_info     ← check transcriptStatus
-      ↓
-get_video_transcript
-      ↓
-upload_video       ← (optional) push a public URL into the library
+list_folder_files → pick a fileId
+        ↓
+get_file_transcript  |  get_transcript_chunks  |  get_all_transcripts
+        ↓
+ask_recording        ← ask an AI question about the recording
+        ↓
+add_file_tag         ← annotate with metadata
 ```
 
 ---
 
-## Tools exposed (5)
+## Tools exposed (7)
 
 | Tool | Purpose |
 |---|---|
-| `list_videos` | List recordings available to the API key |
-| `get_video_info` | Status + metadata; tells you if transcript is ready |
-| `get_video_transcript` | Fetch the transcript (auto-polls if not ready) |
-| `upload_video` | Import a public-URL recording into ScreenApp |
-| `get_account_context` | Verify auth + discover the bound user/team |
-
-> **Not in v1:** the legacy `add_file_tag` and `ask_recording` tools were
-> removed because ScreenApp's current API does not expose those endpoints.
-> If you need them, keep using the legacy v2 service on a separate deploy.
+| `list_folder_files` | List files in a folder; use `'__default'` for root |
+| `get_file_transcript` | Raw transcript for a file (optional time range) |
+| `get_transcript_chunks` | Transcript in fixed-size time chunks |
+| `get_all_transcripts` | Auto-fetch the full transcript for long recordings |
+| `get_file_info` | File metadata + optional video / audio download URLs |
+| `ask_recording` | Ask an AI question about a recording's transcript |
+| `add_file_tag` | Add a metadata tag to a recording |
 
 ---
 
@@ -51,7 +49,7 @@ python -m venv .venv && source .venv/bin/activate   # or .venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# Set SCREENAPP_API_KEY
+# Set SCREENAPP_API_TOKEN and SCREENAPP_TEAM_ID
 python server.py
 ```
 
@@ -61,30 +59,31 @@ The MCP endpoint is served at `http://localhost:8000/mcp`.
 
 ## Connect from Claude / Cursor
 
-For Claude.ai / Cursor (remote mode), point them at your deployed URL. The
-MCP transport at `/mcp` accepts plain JSON-RPC; the API key is read from
-the server's environment, not from the client.
+For Claude.ai / Cursor (remote mode), point them at your deployed URL with
+`Authorization: Bearer <not required>` — the server uses query-time bearer
+auth via the `SCREENAPP_API_TOKEN` itself.
 
 For Claude Desktop (local stdio), wrap with `mcp-proxy` or a similar adapter.
 
 ---
 
-## Required environment variable
+## Required environment variables
 
 | Variable | Description |
 |---|---|
-| `SCREENAPP_API_KEY` | API key from https://screenapp.io → Settings → API (scopes: `files:read`, optionally `files:upload`) |
+| `SCREENAPP_API_TOKEN` | Bearer token from https://screenapp.io → Settings → API |
+| `SCREENAPP_TEAM_ID` | Your workspace / team ID |
 | `PORT` | (Optional) defaults to 8000; Zeabur sets this automatically |
 
 The server starts even without these configured and logs a clear warning —
-API calls will fail with 401 until the key is set.
+API calls will fail with 401 until both are set.
 
 ---
 
 ## Deploy
 
 See [`DEPLOY.md`](./DEPLOY.md) for the full step-by-step Zeabur walkthrough.
-TL;DR — push to GitHub, import the repo in Zeabur, set `SCREENAPP_API_KEY`.
+TL;DR — push to GitHub, import the repo in Zeabur, set the two env vars.
 
 ---
 
