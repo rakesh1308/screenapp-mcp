@@ -104,6 +104,12 @@ cp .env.example .env                 # fill in real token
 python server.py                     # serves on http://localhost:8000
 ```
 
+Run the offline tests (no network calls, fixtures mirror the live v1 shapes):
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## Troubleshooting
 
 - **Container restarts in a loop with no logs** — the Dockerfile or

@@ -36,6 +36,20 @@ upload_video       ← (optional) push a public URL into the library
 | `upload_video` | Import a public-URL recording into ScreenApp |
 | `get_account_context` | Verify auth + discover the bound user/team |
 
+### API notes
+
+- **Response shapes.** `GET /videos` returns `{"videos": [...]}`. `GET /videos/{id}`
+  returns a flat record (`id`, `name`, `duration`, `status`, `transcriptStatus`,
+  `transcriptMeta`, …). `GET /videos/{id}/transcript` returns a **flat** object
+  with `text`, `segments`, `words`, `language`, and `meta` at the top level —
+  there is no wrapper `transcript` key.
+- **No folders.** The v1 API exposes no folder or parent reference on
+  recordings, and `?folderId=` is accepted but ignored. `/videos` also ignores
+  `limit` and returns up to 100 items, so `limit` is clamped client-side only.
+- **Folders/documents live elsewhere.** `/app/api/folders`, `/documents` and
+  `/files` exist under the dashboard's internal API but reject API-key auth.
+  Use the dashboard to browse, then pass a `videoId` here.
+
 > **Not in v1:** the legacy `add_file_tag` and `ask_recording` tools were
 > removed because ScreenApp's current API does not expose those endpoints.
 > If you need them, keep using the legacy v2 service on a separate deploy.

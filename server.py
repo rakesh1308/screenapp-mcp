@@ -269,7 +269,7 @@ async def _get_video_transcript(args: dict) -> str:
         return _err(status, json.dumps(meta))
 
     ts = ((meta.get("transcriptStatus")
-               or meta.get("data", {}).get("transcriptStatus") or "")).lower()
+           or meta.get("data", {}).get("transcriptStatus") or "")).lower()
     if ts and ts != "ready":
         polled_status, polled = await _wait_for_transcript(video_id)
         if polled_status != 200 or polled.get("_transcript_error"):
@@ -280,52 +280,38 @@ async def _get_video_transcript(args: dict) -> str:
 
     status, data = await _get(f"/videos/{video_id}/transcript")
     if status == 409:
-        return (
-            "⏳ Transcript not ready yet (HTTP 409). "
-            "Wait a few seconds and call again."
-        )
+        return "⏳ Transcript not ready yet (HTTP 409). Wait a few seconds and call again."
     if status != 200:
         return _err(status, json.dumps(data))
 
+    # The v1 API returns a flat object: `text` and `segments` are top-level
+    # keys, with no wrapper `transcript` field.
     payload = data.get("data") if isinstance(data.get("data"), dict) else data
-    transcript = (
-        payload.get("transcript")
-        or payload.get("text")
-        or (payload if isinstance(payload, str) else None)
-    )
-    if transcript is None:
+    if isinstance(payload, str):
+        payload = {"text": payload}
+    if not isinstance(payload, dict):
         return f"❌ Unexpected transcript response: {json.dumps(data)[:300]}"
 
-    name = payload.get("name") or payload.get("title") or video_id
-    out = f"📄 {name} | ID: {video_id}\n\n"
+    text = payload.get("text") or ""
+    segments = [s for s in (payload.get("segments") or []) if isinstance(s, dict)]
+    if not text and not segments:
+        return f"❌ Unexpected transcript response: {json.dumps(data)[:300]}"
 
-    if isinstance(transcript, str):
-        body = transcript[:max_chars]
-        out += f"📜 Transcript:\n{body}"
-        if len(transcript) > max_chars:
-            out += f"\n\n⚠️ Truncated to {max_chars} chars of {len(transcript)}."
-        return out
+    out = f"📄 Video {video_id}\n\n"
 
-    segments = transcript.get("segments") or []
-    text = transcript.get("text") or ""
     if text:
-        body = text[:max_chars]
-        out += f"📜 Transcript:\n{body}"
+        out += f"📜 Transcript:\n{text[:max_chars]}"
         if len(text) > max_chars:
             out += f"\n\n⚠️ Truncated to {max_chars} chars of {len(text)}."
         return out
 
-    if not segments:
-        return f"📄 {name}\n⚠️ Transcript has no content yet."
-
     out += "📜 Transcript segments:\n"
-    for seg in segments:
-        s = seg.get("start", 0)
-        spk = seg.get("speaker", "Unknown")
-        txt = seg.get("text", "")
-        line = f"[{s:.0f}s] {spk}: {txt}\n"
+    for index, seg in enumerate(segments):
+        line = f"[{float(seg.get('start') or 0):.0f}s] {seg.get('speaker') or 'Unknown'}: {seg.get('text', '')}\n"
         if len(out) + len(line) > max_chars:
-            out += f"\n⚠️ Truncated at {max_chars} chars."
+            omitted = len(segments) - index
+            out += (f"\n⚠️ Truncated at {max_chars} chars. "
+                    f"{omitted} of {len(segments)} segments omitted.")
             break
         out += line
     return out
